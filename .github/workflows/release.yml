@@ -1,0 +1,51 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Build standalone executable
+        run: python -m PyInstaller --clean --noconfirm build.spec
+      - name: Smoke test packaged app
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $app = Start-Process -FilePath ".\dist\CS2-Sensitivity-Generator.exe" -ArgumentList "--smoke-test" -WindowStyle Hidden -PassThru
+          if (-not $app.WaitForExit(60000)) {
+            Stop-Process -Id $app.Id -Force
+            throw "Packaged app did not exit within 60 seconds"
+          }
+          if ($app.ExitCode -ne 0) { throw "Packaged app exited with code $($app.ExitCode)" }
+      - name: Publish Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $asset = "dist/CS2-Sensitivity-Generator.exe"
+          gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "$env:RELEASE_TAG" "$asset" --clobber --repo "$env:GITHUB_REPOSITORY"
+          } else {
+            gh release create "$env:RELEASE_TAG" "$asset" --verify-tag --generate-notes --repo "$env:GITHUB_REPOSITORY"
+          }
+          exit $LASTEXITCODE
