@@ -2,6 +2,8 @@ name: Windows Release
 
 on:
   push:
+    branches:
+      - 'release/v1.1.0'
     tags:
       - 'v*.*.*'
 
@@ -13,6 +15,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -42,6 +46,25 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           $asset = "dist/CS2-Sensitivity-Generator.exe"
+          if ($env:GITHUB_REF_TYPE -eq 'branch') {
+            $tag = 'v1.1.0'
+            $target = 'e89904106ec5f395384c3a6c54f1fb17239d4318'
+            $source = 'dist/CS2-Sensitivity-Generator-source.zip'
+            git archive --format=zip --prefix=CS2-Sensitivity-Generator/ --output=$source $target
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $notes = @'
+          ## 更新内容
+
+          - 两轮灵敏度盲测，近远角目标初筛后更换场景复核。
+          - 独立的选手准星和灵敏度预设，支持分别加载及导出 CFG。
+          - 16 方向轨迹分析、样本补测、本地历史对比和清理。
+          - 修复默认历史目录不可写时界面卡住的问题。
+
+          下载 `CS2-Sensitivity-Generator.exe` 即可运行。
+          '@
+            gh release create $tag $asset $source --target $target --title $tag --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            exit $LASTEXITCODE
+          }
           gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" 2>$null
           if ($LASTEXITCODE -eq 0) {
             gh release upload "$env:RELEASE_TAG" "$asset" --clobber --repo "$env:GITHUB_REPOSITORY"
@@ -49,3 +72,4 @@ jobs:
             gh release create "$env:RELEASE_TAG" "$asset" --verify-tag --generate-notes --repo "$env:GITHUB_REPOSITORY"
           }
           exit $LASTEXITCODE
+
