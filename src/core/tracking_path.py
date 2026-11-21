@@ -48,14 +48,16 @@ class Strafe:
 
 
 class TrackingPath:
-    def __init__(self, speed: int = DEFAULT_WEAPON_SPEED, depth: int = DEFAULT_DISTANCE) -> None:
+    def __init__(self, speed: int = DEFAULT_WEAPON_SPEED, depth: int = DEFAULT_DISTANCE,
+                 *, reverse: bool = False) -> None:
         if speed not in dict(WEAPON_SPEEDS).values() or depth <= 0:
             raise ValueError("Expected a supported weapon speed and positive forward distance")
         self.depth = depth
         self.initial_hold = STOPS[0][1]
         self.strafes = []
         acceleration = speed / RAMP_SECONDS
-        for (from_offset, _), (to_offset, rest) in zip(STOPS, STOPS[1:]):
+        stops = STOPS[::-1] if reverse else STOPS
+        for (from_offset, _), (to_offset, rest) in zip(stops, stops[1:]):
             start, end = from_offset * depth, to_offset * depth
             distance = abs(end - start)
             peak = min(speed, sqrt(distance * acceleration))
@@ -66,15 +68,23 @@ class TrackingPath:
 
     def sample(self, elapsed: float) -> tuple[float, int]:
         """Return fixed-height projection-plane x and a qualified direction sign."""
+        x, direction, _ = self.frame(elapsed)
+        return x, direction
+
+    def frame(self, elapsed: float) -> tuple[float, int, tuple[float, int] | None]:
         cycle_number, phase = divmod(max(0.0, elapsed), self.cycle)
         mirror = -1 if cycle_number % 2 else 1
         remaining = phase - self.initial_hold
         if remaining < 0:
-            return 0.0, 0
+            return 0.0, 0, None
+        started = cycle_number * self.cycle + self.initial_hold
         for strafe in self.strafes:
             leg = strafe.travel + strafe.rest
             if remaining < leg:
                 x, direction = strafe.sample(remaining)
-                return mirror * x / self.depth, mirror * direction
+                sign = 1 if strafe.end > strafe.start else -1
+                motion = (started, mirror * sign) if remaining < strafe.travel else None
+                return mirror * x / self.depth, mirror * direction, motion
             remaining -= leg
-        return 0.0, 0  # Floating-point rounding at the cycle boundary.
+            started += leg
+        return 0.0, 0, None

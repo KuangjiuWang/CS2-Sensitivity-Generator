@@ -70,14 +70,6 @@ def physical_baseline(dpi: float, pad_cm: float, profile: str) -> tuple[float, f
     return sensitivity, swing_cm, turn
 
 
-def corrected_sensitivity(base: float, overshoot_deg: float,
-                          lag_rate: float, lead_rate: float) -> float:
-    # A single pass is intentionally bounded. Opposing evidence can cancel.
-    flick = min(0.08, 0.04 * max(0.0, overshoot_deg))
-    tracking = 0.10 * max(-1.0, min(1.0, lag_rate - lead_rate))
-    return positive(base) * (1 + max(-0.12, min(0.12, tracking - flick)))
-
-
 def cfg_text(sensitivity: float, zoom: float) -> str:
     return f'sensitivity "{positive(sensitivity):.3f}"\nzoom_sensitivity_ratio "{positive(zoom):.3f}"\n'
 

@@ -1,6 +1,5 @@
 """Borderless camera-based practice arena and monotonic scoring."""
-from dataclasses import dataclass
-from math import atan, ceil, cos, degrees, hypot, pi, radians, sin, tan
+from math import atan, ceil, cos, degrees, hypot, radians, tan
 from random import Random
 from time import perf_counter
 
@@ -9,32 +8,19 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from core.cs2_math import Camera, M_YAW, Preset, VERTICAL_TANGENT, segment_hit
+from core.crosshair import Crosshair
+from core.flick_analysis import FlickTrial, SECTOR_LABELS, local_angles
+from core.practice_plan import FlickPlan, target_at
 from core.raw_input import RawMouseInput
-from core.telemetry import FlickStats, TrackingStats
+from core.telemetry import FlickStats, TrackingStats, TrackingTiming
 from core.tracking_path import DEFAULT_DIAMETER_DEG, DEFAULT_DISTANCE, DEFAULT_WEAPON_SPEED, TrackingPath
+from ui.crosshair import draw_crosshair
+from ui.toast import Toast
 
 FLICK_RADIUS = 0.037
 TRACK_BIAS_DEADZONE = tan(radians(1))
 OVERSHOOT_WINDOW = 0.18
-
-
-@dataclass(frozen=True)
-class Crosshair:
-    color: str = "#E7FD8B"
-    length: int = 8
-    gap: int = 4
-    width: int = 2
-    dot: bool = True
-
-    def draw(self, painter: QPainter, center: QPointF) -> None:
-        for color, width in (("#10131D", self.width + 2), (self.color, self.width)):
-            painter.setPen(QPen(QColor(color), width))
-            for x, y in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                start = center + QPointF(x * self.gap, y * self.gap)
-                end = center + QPointF(x * (self.gap + self.length), y * (self.gap + self.length))
-                painter.drawLine(start, end)
-            if self.dot:
-                painter.drawPoint(center)
+FLICK_TIMEOUT = 2.5
 
 
 class AimArena(QWidget):
@@ -42,17 +28,22 @@ class AimArena(QWidget):
 
     def __init__(self, mode: str, sensitivity: float, preset: Preset,
                  duration: int, crosshair: Crosshair, tracking_speed: int = DEFAULT_WEAPON_SPEED,
-                 tracking_distance: int = DEFAULT_DISTANCE, tracking_diameter: float = DEFAULT_DIAMETER_DEG):
+                 tracking_distance: int = DEFAULT_DISTANCE, tracking_diameter: float = DEFAULT_DIAMETER_DEG,
+                 *, plan: FlickPlan | None = None, stage: str = "", reverse_tracking: bool = False):
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.mode, self.sensitivity, self.preset = mode, sensitivity, preset
-        self.duration, self.crosshair = duration, crosshair
+        self.duration, self.crosshair = plan.duration if plan is not None else duration, crosshair
+        self.plan, self.stage = plan, stage
+        self.stage_toast = Toast(self) if stage else None
+        self.plan_index = -1
         self.setWindowTitle("CS2 Sensitivity Generator · 测试场")
         self.setCursor(Qt.CursorShape.BlankCursor)
         self.raw = RawMouseInput(self.move_camera)
         self.camera = Camera()
-        self.tracking_path = TrackingPath(tracking_speed, tracking_distance)
+        self.tracking_path = TrackingPath(tracking_speed, tracking_distance, reverse=reverse_tracking)
         self.tracking_radius = tan(radians(tracking_diameter / 2))
         self.stats = FlickStats() if mode == "flick" else TrackingStats()
+        self.tracking_timing = TrackingTiming(self.stats) if mode == "tracking" else None
         self.random = Random()
         self.timer = QTimer(self, timerType=Qt.TimerType.PreciseTimer, interval=8)
         self.timer.timeout.connect(self.tick)
@@ -62,11 +53,10 @@ class AimArena(QWidget):
         self.test_started = False
         self.track_camera = None
         self.target = None
-        self.spawn_time = 0.0
         self.last_sample = 0.0
-        self.hit_time = None
-        self.peak = 0.0
-        self.direction = (0.0, 0.0)
+        self.flick_trial = None
+        self.flick_basis = self.camera.basis()
+        self.sector_order = []
         self.done = False
         self.error = ""
         # Static reference dots give visible camera motion even after losing the target.
@@ -93,6 +83,8 @@ class AimArena(QWidget):
                     self.error = f"无法启动 Win32 Raw Input：{error}"
                     self.close()
                     return
+                if self.stage_toast is not None:
+                    self.stage_toast.notify(f"{self.stage} · 移动鼠标开始")
             elif now >= self.activation_deadline:
                 self.error = "测试窗口未获得焦点，请重试。"
                 self.close()
@@ -121,17 +113,48 @@ class AimArena(QWidget):
             if self.track_camera is None:
                 self.track_camera = Camera(self.camera.yaw, self.camera.pitch)
             self.integrate_tracking(until)
-        elif self.target is None:
-            self.spawn_flick(until)
-        elif self.hit_time is not None and until >= self.hit_time + OVERSHOOT_WINDOW:
-            self.stats.record_overshoot(self.peak)
-            if until < self.end_time:
-                self.spawn_flick(until)
-        elif self.hit_time is None and until >= self.spawn_time + 2.5 and until < self.end_time:
-            self.spawn_flick(until)
+        elif self.plan is not None:
+            self.advance_plan(until)
+        else:
+            self.advance_flick(until)
         if now >= self.end_time:
             self.done = True
             self.close()
+
+    def advance_flick(self, until: float) -> None:
+        trial = self.flick_trial
+        if trial is not None:
+            hit = trial.hit_time is not None
+            overshoot_ready = hit and until >= trial.hit_time + OVERSHOOT_WINDOW
+            timed_out = not hit and until >= trial.started + FLICK_TIMEOUT
+            if overshoot_ready or timed_out or until >= self.end_time:
+                self.finish_target(until, timed_out)
+        if self.flick_trial is None and until < self.end_time:
+            self.spawn_flick(until)
+
+    def advance_plan(self, until: float) -> None:
+        count = len(self.plan.targets)
+        due = min(count, int((until - self.start_time) / self.plan.interval + 1e-8))
+        while self.plan_index < due:
+            self.plan_index += 1
+            boundary = self.start_time + self.plan_index * self.plan.interval
+            if self.flick_trial is not None:
+                self.finish_target(boundary, True)
+            if self.plan_index < count:
+                self.camera.yaw = self.camera.pitch = 0
+                self.spawn_flick(boundary, self.plan.targets[self.plan_index])
+
+    def finish_target(self, until: float, full_attempt: bool) -> None:
+        trial = self.flick_trial
+        hit = trial.hit_time is not None
+        if hit or full_attempt:
+            overshoot = trial.peak if hit and until >= trial.hit_time + OVERSHOOT_WINDOW else None
+            self.stats.sectors[trial.sector].add(trial, overshoot)
+            if overshoot is not None:
+                self.stats.record_overshoot(overshoot)
+        else:
+            self.stats.attempts -= 1
+        self.flick_trial = self.target = None
 
     def move_camera(self, dx: int, dy: int) -> None:
         if self.input_deadline is None or self.done or not self.isActiveWindow():
@@ -150,34 +173,34 @@ class AimArena(QWidget):
         if self.mode != "flick" or self.target is None:
             self.camera.move(dx, dy, self.sensitivity)
             return
+        trial = self.flick_trial
+        if trial.hit_time is not None and now >= trial.hit_time + OVERSHOOT_WINDOW:
+            self.camera.move(dx, dy, self.sensitivity)
+            return
         # Subdivide unusually large packets so a fast flick can cross a small target.
         steps = max(1, ceil(max(abs(dx), abs(dy)) * self.sensitivity * M_YAW / 2))
+        before = self.camera.project(self.target)
         for _ in range(steps):
-            before = self.camera.project(self.target)
             self.camera.move(dx / steps, dy / steps, self.sensitivity)
             after = self.camera.project(self.target)
-            if before is None or after is None:
-                continue
-            if self.hit_time is None and segment_hit(before, after, FLICK_RADIUS) is not None:
-                self.hit_time = now
-                self.stats.hit(now - self.spawn_time)
-            if self.hit_time is not None:
-                beyond = -(after[0] * self.direction[0] + after[1] * self.direction[1])
-                angle = degrees(atan(beyond) - atan(FLICK_RADIUS))
-                self.peak = max(self.peak, angle)
+            hit_fraction = None
+            if trial.hit_time is None and before is not None and after is not None:
+                hit_fraction = segment_hit(before, after, FLICK_RADIUS)
+                if hit_fraction is not None:
+                    self.stats.hit(now - trial.started)
+            trial.move(local_angles(self.camera.basis()[0], self.flick_basis), now, hit_fraction)
+            before = after
 
-    def spawn_flick(self, now: float) -> None:
-        angle = self.random.uniform(0, 2 * pi)
-        distance = self.random.uniform(.28, .57)
-        x, y = cos(angle), .72 * sin(angle)
-        if abs(self.camera.pitch) > 32:
-            y = -abs(y) if self.camera.pitch > 0 else abs(y)
-        length = hypot(x, y)
-        self.direction = (x / length, y / length)
-        self.target = self.camera.ray(x * distance, y * distance)
-        self.spawn_time = now
-        self.hit_time = None
-        self.peak = 0
+    def spawn_flick(self, now: float, target=None) -> None:
+        if target is None:
+            if not self.sector_order:
+                self.sector_order = list(range(len(SECTOR_LABELS)))
+                self.random.shuffle(self.sector_order)
+            target = target_at(self.sector_order.pop(), self.random)
+        yaw, pitch = (radians(value) for value in target)
+        self.flick_basis = self.camera.basis()
+        self.target = self.camera.ray(tan(yaw), tan(pitch) / cos(yaw))
+        self.flick_trial = FlickTrial(target, degrees(atan(FLICK_RADIUS)), now)
         self.stats.attempts += 1
 
     def tracking_ray(self, elapsed: float):
@@ -188,9 +211,11 @@ class AimArena(QWidget):
         while self.last_sample < until:
             end = min(until, self.last_sample + 1 / 120)
             elapsed = (end + self.last_sample) / 2 - self.start_time
-            x, direction = self.tracking_path.sample(elapsed)
+            x, direction, motion = self.tracking_path.frame(elapsed)
             point = self.camera.project(self.track_camera.ray(x, 0))
-            inside = point is not None and hypot(*point) <= self.tracking_radius
+            error_radii = hypot(*point) / self.tracking_radius if point is not None else float("inf")
+            inside = error_radii <= 1
+            self.tracking_timing.observe(motion, elapsed, self.camera.yaw, inside)
             along = None
             if point is not None and direction:
                 ahead = self.camera.project(self.track_camera.ray(x + direction * .001, 0))
@@ -199,7 +224,7 @@ class AimArena(QWidget):
                     length = hypot(vx, vy)
                     if length > 0:
                         along = (point[0] * vx + point[1] * vy) / length
-            self.stats.sample(end - self.last_sample, inside, along, TRACK_BIAS_DEADZONE)
+            self.stats.sample(end - self.last_sample, inside, along, TRACK_BIAS_DEADZONE, error_radii=error_radii)
             self.last_sample = end
 
     def paintEvent(self, event) -> None:
@@ -233,7 +258,8 @@ class AimArena(QWidget):
         if target is not None:
             point = self.camera.project(target)
             if point is not None:
-                active = self.hit_time is not None or hypot(*point) <= radius
+                active = (self.flick_trial is not None and self.flick_trial.hit_time is not None
+                          or hypot(*point) <= radius)
                 color = QColor("#D8F576" if active else "#63DCE8")
                 pixel = screen_point(point)
                 if viewport.adjusted(-sx * radius, -sy * radius, sx * radius, sy * radius).contains(pixel):
@@ -242,10 +268,12 @@ class AimArena(QWidget):
                     painter.setBrush(color)
                     painter.drawEllipse(pixel, sx * radius, sy * radius)
 
-        self.crosshair.draw(painter, center)
+        stretch = w / (h * self.preset.ratio) if self.preset.stretched else 1.0
+        draw_crosshair(painter, center, self.crosshair, h, stretch)
         painter.setPen(QColor("#ECF1FA"))
+        title = "悬停拉枪" if self.mode == "flick" else "动态跟枪"
         painter.drawText(QRectF(x + 24, y + 20, w - 48, 28), Qt.AlignmentFlag.AlignLeft,
-                         "HOVER FLICK  ·  悬停拉枪" if self.mode == "flick" else "SMOOTH TRACKING  ·  动态跟枪")
+                         f"{self.stage}  ·  {title}" if self.stage else title)
         painter.drawText(QRectF(x + 24, y + 20, w - 48, 28), Qt.AlignmentFlag.AlignRight, "ESC  退出")
         if self.start_time is None:
             label = "移动鼠标以开始测试"

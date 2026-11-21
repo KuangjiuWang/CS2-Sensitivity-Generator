@@ -6,7 +6,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from core.cs2_math import (Camera, PRESETS, PROFILES, cfg_text, cm_per_360,
-                           console_text, corrected_sensitivity, edpi,
+                           console_text, edpi,
                            physical_baseline, segment_hit, sensitivity_for_cm)
 from core.telemetry import FlickStats, TrackingStats
 
@@ -29,12 +29,6 @@ class SensitivityTests(unittest.TestCase):
         for value in (0, -1, float("nan"), float("inf")):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 cm_per_360(value, 1)
-
-    def test_correction_direction_and_bounds(self):
-        self.assertAlmostEqual(corrected_sensitivity(1, 1, 0, 0), .96)
-        self.assertAlmostEqual(corrected_sensitivity(1, 0, .60, .10), 1.05)
-        self.assertAlmostEqual(corrected_sensitivity(1, 0, .30, .30), 1)
-        self.assertAlmostEqual(corrected_sensitivity(1, 20, 0, 1), .88)
 
     def test_export_uses_same_three_decimal_values(self):
         self.assertEqual(cfg_text(1.2344, 1), 'sensitivity "1.234"\nzoom_sensitivity_ratio "1.000"\n')
@@ -86,10 +80,11 @@ class TelemetryTests(unittest.TestCase):
 
     def test_tracking_weights_by_duration_and_filters_stationary_direction(self):
         track = TrackingStats()
-        track.sample(.3, True, 0, .05)
-        track.sample(.4, False, .1, .05)
-        track.sample(.1, False, -.1, .05)
-        track.sample(.2, False, None, .05)
+        track.sample(.3, True, 0, .05, error_radii=0)
+        track.sample(.4, False, .1, .05, error_radii=2)
+        track.sample(.1, False, -.1, .05, error_radii=4)
+        track.sample(.2, False, None, .05, error_radii=float("inf"))
+        self.assertAlmostEqual(track.centering, .5)
         self.assertAlmostEqual(track.accuracy, .3)
         self.assertAlmostEqual(track.lag_rate, .5)
         self.assertAlmostEqual(track.lead_rate, .125)
