@@ -7,7 +7,7 @@ from PySide6.QtCore import QSignalBlocker, QStandardPaths, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QStyle, QVBoxLayout, QWidget,
 )
 
 from core.cs2_math import (
@@ -22,6 +22,7 @@ from core.player_crosshairs import CrosshairPreset
 from core.player_sensitivity import SensitivityPreset
 from core.recommendation import MATCH_KEYS, TrainingAdvice, adjustment_indicator, suite_advice, training_advice
 from core.scenarios import SCENARIOS, TRAINING_DURATIONS
+from core.sensitivity_conversion import PUBG_FOV_DEFAULT, PUBG_FOV_MAX, PUBG_FOV_MIN, hipfire_values
 from core.telemetry import ClickStats
 from ui.aim_arena import AimArena
 from ui.comparison import APPLY_BLIND_RESULT, BlindResults, HistoryDialog, SuiteResults, milliseconds
@@ -161,7 +162,9 @@ class MainWindow(QWidget):
         for preset in PRESETS:
             self.aspect.addItem(f"{preset.label} · {preset.horizontal_fov:.2f}°", preset)
         form.addRow("鼠标 DPI", dpi_controls)
-        form.addRow("当前步枪灵敏度", self.initial_sensitivity)
+        form.addRow("CS2 步枪灵敏度", self.initial_sensitivity)
+        form.addRow(label("这是鼠标输入换算成游戏内转向速度的倍数。设为 1.150，同样移动距离下，"
+                          "视角转动量是 1.000 的 1.15 倍。", "muted", True))
         form.addRow("鼠标垫有效横向宽度", self.pad)
         form.addRow("发力习惯", self.profile)
         form.addRow("CS2 画面比例", self.aspect)
@@ -172,8 +175,42 @@ class MainWindow(QWidget):
         physical_layout.addWidget(use_physical)
         physical_layout.addStretch()
 
+        conversion, conversion_layout = card("跨游戏腰射换算")
+        grid.addWidget(conversion, 0, 1)
+        self.conversion_distance = label(style="muted", wrap=True)
+        conversion_layout.addWidget(self.conversion_distance)
+        conversion_grid = QGridLayout()
+        conversion_grid.setHorizontalSpacing(8)
+        conversion_grid.setVerticalSpacing(7)
+        conversion_grid.setColumnStretch(0, 1)
+        conversion_grid.addWidget(label("游戏内设置", "muted"), 0, 0)
+        conversion_grid.addWidget(label("填入值", "muted"), 0, 1, Qt.AlignmentFlag.AlignRight)
+        self.conversion_values = {}
+        for row, (key, text) in enumerate((
+            ("valorant", "无畏契约 · 瞄准灵敏度"),
+            ("battlefield", "战地 6 · 步兵鼠标瞄准"),
+            ("pubg", "PUBG · 常规灵敏度（FPP）"),
+            ("apex", "Apex Legends · 鼠标灵敏度"),
+        ), 1):
+            conversion_grid.addWidget(label(text, wrap=True), row, 0)
+            value = label("—")
+            value.setAccessibleName(text)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            conversion_grid.addWidget(value, row, 1, Qt.AlignmentFlag.AlignRight)
+            self.conversion_values[key] = value
+        conversion_layout.addLayout(conversion_grid)
+        pubg_form = QFormLayout()
+        self.pubg_fov = integer(PUBG_FOV_MIN, PUBG_FOV_MAX, PUBG_FOV_DEFAULT)
+        self.pubg_fov.setSuffix("°")
+        self.pubg_fov.valueChanged.connect(self.refresh_conversions)
+        pubg_form.addRow("PUBG 第一人称 FOV", self.pubg_fov)
+        conversion_layout.addLayout(pubg_form)
+        conversion_layout.addWidget(label("战地 6 和 PUBG 为估算值，可在游戏训练场核对转身距离。",
+                                          "muted", True))
+        conversion_layout.addStretch()
+
         practice, practice_layout = card("全屏训练与盲测")
-        grid.addWidget(practice, 0, 1)
+        grid.addWidget(practice, 1, 0)
         self.duration = QComboBox()
         for seconds in TRAINING_DURATIONS:
             self.duration.addItem(f"{seconds} 秒 / 项", seconds)
@@ -235,8 +272,12 @@ class MainWindow(QWidget):
         grid.addWidget(export, 3, 1)
         self.metrics = label(style="metric", wrap=True)
         self.summary = label(style="muted", wrap=True)
+        self.recommendation_evidence = label(style="muted", wrap=True)
+        self.recommendation_evidence.setAccessibleName("推荐依据")
+        self.recommendation_evidence.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         export_layout.addWidget(self.metrics)
         export_layout.addWidget(self.summary)
+        export_layout.addWidget(self.recommendation_evidence)
         self.apply_recommendation = QPushButton("应用建议到当前步枪灵敏度")
         self.apply_recommendation.clicked.connect(self.apply_current_recommendation)
         self.recommendation_help = QPushButton("推荐说明")
@@ -263,24 +304,26 @@ class MainWindow(QWidget):
         commands.addWidget(save, 1, 1)
         export_layout.addLayout(commands)
         results, results_layout = card("分析与历史")
-        grid.addWidget(results, 1, 0, 1, 2)
-        result_actions = QHBoxLayout()
+        grid.addWidget(results, 1, 1)
+        result_actions = QGridLayout()
         self.analysis_button = QPushButton("16 方向轨迹分析…")
         self.analysis_button.clicked.connect(self.show_flick_results)
         self.clear_button = QPushButton("清除本次测试数据")
         self.clear_button.clicked.connect(self.clear_test_results)
-        result_actions.addWidget(self.analysis_button)
         self.history_button = QPushButton()
         self.history_button.clicked.connect(self.show_history)
-        result_actions.addWidget(self.history_button)
         self.reveal_button = QPushButton("查看最近盲测结果")
         self.reveal_button.clicked.connect(self.show_blind_results)
-        result_actions.addWidget(self.reveal_button)
         self.suite_results_button = QPushButton("查看六项结果")
         self.suite_results_button.clicked.connect(self.show_suite_results)
-        result_actions.addWidget(self.suite_results_button)
-        result_actions.addWidget(self.clear_button)
+        for index, button in enumerate((self.analysis_button, self.history_button, self.reveal_button,
+                                        self.suite_results_button, self.clear_button)):
+            result_actions.addWidget(button, index // 2, index % 2)
         results_layout.addLayout(result_actions)
+        results_layout.addStretch()
+        self.dashboard_grid = grid
+        self.dashboard_cards = (physical, conversion, practice, results, players, player_crosshairs, cross, export)
+        self.dashboard_columns = 2
 
         self.status = label("测试使用当前 CS2 灵敏度。全屏后移动鼠标开始倒计时，按 Esc 退出。", "muted", True)
         self.status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
@@ -300,8 +343,30 @@ class MainWindow(QWidget):
         self.crosshair_panel.players.currentTextChanged.connect(
             lambda name: self.notify(f"正在预览 {name} 的准星。"))
         self.refresh()
+        self.arrange_dashboard()
         if self.history.error:
             self.notify(f"本地历史无法读取：{self.history.error}")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "dashboard_grid"):
+            self.arrange_dashboard()
+
+    def arrange_dashboard(self) -> None:
+        grid = self.dashboard_grid
+        cards = self.dashboard_cards
+        left_width = max(card.minimumSizeHint().width() for card in cards[::2])
+        right_width = max(card.minimumSizeHint().width() for card in cards[1::2])
+        margins = self.content.layout().contentsMargins()
+        gutter = self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        minimum = left_width + right_width + margins.left() + margins.right() + grid.spacing() + gutter
+        columns = 2 if self.width() >= minimum else 1
+        if columns != self.dashboard_columns:
+            self.dashboard_columns = columns
+            grid.setColumnStretch(1, int(columns == 2))
+            for index, widget in enumerate(cards):
+                grid.removeWidget(widget)
+                grid.addWidget(widget, index // columns, index % columns)
 
     def crosshair(self) -> Crosshair:
         return self.crosshair_settings
@@ -432,7 +497,18 @@ class MainWindow(QWidget):
     def baseline_values(self):
         return physical_baseline(self.dpi.value(), self.pad.value(), self.profile.currentData())
 
+    def refresh_conversions(self) -> None:
+        sensitivity = self.initial_sensitivity.value()
+        dpi = self.dpi.value()
+        distance = cm_per_360(dpi, sensitivity)
+        self.conversion_distance.setText(f"同为 {dpi} DPI · 匹配水平转身距离 {distance:.2f} cm/360°")
+        values = hipfire_values(sensitivity, self.pubg_fov.value())
+        for key, places in (("valorant", 3), ("battlefield", 0), ("pubg", 0), ("apex", 2)):
+            value = values[key]
+            self.conversion_values[key].setText(f"{value:.{places}f}" if value is not None else "超出范围")
+
     def refresh(self) -> None:
+        self.refresh_conversions()
         crosshair = self.crosshair_settings
         self.crosshair_summary.setText(f"{crosshair.style} · {STYLES[crosshair.style]}   ·   "
                                       f"厚度 {crosshair.thickness} px")
@@ -460,6 +536,7 @@ class MainWindow(QWidget):
                                    f"启动 {milliseconds(reaction)} · 移动后定位 {milliseconds(movement)}")
         value = base
         detail = f"当前步枪 {base:.3f} · 完成普通训练或 A/B/C 盲测获取建议"
+        evidence = ()
         advice = None
         if self.last_training is not None:
             settings, training = self.last_training
@@ -469,15 +546,19 @@ class MainWindow(QWidget):
         if advice is not None:
             value = advice.value
             detail = f"步枪 {base:.3f} → {value:.3f}（{value - base:+.3f}） · {advice.reason}"
+            evidence = advice.evidence
         elif blind_valid:
             decision = self.last_blind.decision()
             value = decision.recommend.sensitivity
             detail = f"步枪 {base:.3f} → {value:.3f}（{value - base:+.3f}） · {decision.reason}"
+            evidence = decision.evidence
         self.recommendation = round(value, 3)
         self.apply_recommendation.setEnabled(self.recommendation != base)
         self.metrics.setText(f"{self.recommendation:.3f} sens · {adjustment_indicator(base, self.recommendation)}   ·   {edpi(dpi, self.recommendation):.0f} eDPI\n"
                              f"{cm_per_360(dpi, self.recommendation):.2f} cm/360°")
         self.summary.setText(detail)
+        self.recommendation_evidence.setText("\n".join(evidence))
+        self.recommendation_evidence.setVisible(bool(evidence))
         self.cfg.setPlainText(cfg_text(self.recommendation).rstrip())
         self.settings_timer.start()
 
@@ -655,7 +736,8 @@ class MainWindow(QWidget):
         layout.addWidget(label("如何读推荐值", "section"))
         layout.addWidget(label(
             "「当前值 → 建议值」是训练前的步枪灵敏度和建议试用的值。↑ 表示调高，↓ 表示调低。"
-            "eDPI 是 DPI × 灵敏度，cm/360° 是游戏内转一整圈所需移动的距离。", wrap=True))
+            "eDPI 是 DPI × 灵敏度，cm/360° 是游戏内转一整圈所需移动的距离。"
+            "应用建议后，跨游戏换算表会跟随输入框更新。", wrap=True))
         layout.addWidget(label("普通训练", "section"))
         layout.addWidget(label(
             "完成一轮就根据本轮瞄准表现给建议，最多调整 3%。固定靶看首段位移，移动靶看开枪瞬间的偏差。至少有 6 个有效样本，且偏差在多个方向一致时才调整。", wrap=True))

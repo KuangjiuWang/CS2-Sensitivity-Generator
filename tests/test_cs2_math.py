@@ -9,6 +9,25 @@ from core.cs2_math import (Camera, PRESETS, PROFILES, cfg_text, cm_per_360,
                            console_text, edpi,
                            physical_baseline, sensitivity_for_cm)
 from core.telemetry import FlickStats, TrackingStats
+from core.sensitivity_conversion import hipfire_values
+
+
+class HipfireConversionTests(unittest.TestCase):
+    def test_documented_example(self):
+        self.assertEqual(hipfire_values(1.15), {
+            "valorant": 0.361, "battlefield": 13, "pubg": 35, "apex": 1.15,
+        })
+
+    def test_pubg_fov_changes_only_the_pubg_slider(self):
+        narrow = hipfire_values(1.15, 80)
+        wide = hipfire_values(1.15, 103)
+        self.assertGreater(narrow.pop("pubg"), wide.pop("pubg"))
+        self.assertEqual(narrow, wide)
+
+    def test_out_of_range_is_not_silently_clamped(self):
+        for sensitivity in (0.001, 100):
+            with self.subTest(sensitivity=sensitivity):
+                self.assertTrue(all(value is None for value in hipfire_values(sensitivity).values()))
 
 
 class SensitivityTests(unittest.TestCase):

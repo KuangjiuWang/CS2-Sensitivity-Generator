@@ -30,7 +30,10 @@ class BlindWorkflowTests(unittest.TestCase):
             return [TrainingAdvice(value, "") for value in values]
         self.assertEqual(suite_advice(1, results(1.02, 1.04, 1, 1, 1, .98)).value, 1.03)
         self.assertEqual(suite_advice(1, results(1.08, 1.1, 1, 1, 1, 1)).value, 1.03)
-        self.assertEqual(suite_advice(1, results(1.02, 1.04, .98, .97, 1, 1)).value, 1)
+        conflict = suite_advice(1, results(1.02, 1.04, .98, .97, 1, 1))
+        self.assertEqual(conflict.value, 1)
+        self.assertIn("建议方向不一致", conflict.reason)
+        self.assertIn("2 项建议调高，2 项建议调低，2 项建议保持", conflict.evidence[0])
         self.assertEqual(suite_advice(1, results(.98, 1, 1, 1, 1, 1)).value, 1)
 
     def test_training_only_suggests_bounded_changes_for_repeated_static_errors(self):
@@ -40,9 +43,17 @@ class BlindWorkflowTests(unittest.TestCase):
         self.assertEqual(first_pass_error((16, 0), .8, short), -.25)
         stats = ClickStats(elapsed=15, attempts=12, hits=12, points=12,
                            first_pass_errors=[(i % 4, .2) for i in range(12)])
-        self.assertEqual(training_advice(stats, 1.15).value, 1.116)
+        suggestion = training_advice(stats, 1.15)
+        self.assertEqual(suggestion.value, 1.116)
+        self.assertIn("4/4", suggestion.evidence[0])
+        self.assertIn("12/12", suggestion.evidence[0])
+        self.assertIn("12 个方向少于 3 个有效样本", suggestion.evidence[1])
         stats.first_pass_errors = [(0, .2)] * 12
-        self.assertEqual(training_advice(stats, 1.15).value, 1.15)
+        self.assertIn("覆盖方向不足", training_advice(stats, 1.15).reason)
+        stats.first_pass_errors = [(0, .2)] * 5
+        advice = training_advice(stats, 1.15)
+        self.assertEqual(advice.value, 1.15)
+        self.assertIn("有效样本不足 6 个", advice.reason)
 
     def test_single_round_uses_signed_shot_error_and_displays_direction(self):
         error = shot_error((10, 0), (9, .1), .6)
@@ -88,7 +99,10 @@ class BlindWorkflowTests(unittest.TestCase):
             capture_phase(session, candidate_track=18)
         for _ in range(12):
             capture_phase(session, candidate_track=8.4)
-        self.assertEqual(session.decision().recommend.sensitivity, 1)
+        decision = session.decision()
+        self.assertEqual(decision.recommend.sensitivity, 1)
+        self.assertIn("未通过复核", decision.reason)
+        self.assertIn("中位分差低于 2 分", decision.evidence[1])
 
     def test_click_scoring_rejects_faster_but_significantly_less_accurate(self):
         session = BlindSession.create(1, 5, Random(12))
@@ -96,7 +110,19 @@ class BlindWorkflowTests(unittest.TestCase):
             better = session.current.sensitivity > session.baseline
             session.record(ClickStats(elapsed=15, hits=18 if better else 12,
                                       attempts=30 if better else 13, points=18 if better else 12))
-        self.assertEqual(session.decision().recommend.sensitivity, 1)
+        decision = session.decision()
+        self.assertEqual(decision.recommend.sensitivity, 1)
+        self.assertTrue(any("准确率下降超过 5 个百分点" in detail for detail in decision.evidence))
+
+    def test_screening_explains_insufficient_paired_projects(self):
+        session = BlindSession.create(1, 5, Random(12))
+        for _ in range(18):
+            hits = 8 if session.current.sensitivity == session.baseline or session.index < 3 else 5
+            session.record(ClickStats(elapsed=15, hits=hits, attempts=8, points=hits))
+        decision = session.decision()
+        self.assertEqual(decision.recommend.sensitivity, 1)
+        self.assertIn("两档候选都不足四项", decision.reason)
+        self.assertTrue(all("3/6 项可比较" in detail for detail in decision.evidence))
 
     def test_precision_tiebreaker_requires_matched_samples(self):
         better = ClickStats(elapsed=15, hits=12, attempts=12, points=12)

@@ -50,6 +50,11 @@ class BlindResults(QDialog):
         title.setObjectName("metric")
         title.setWordWrap(True)
         layout.addWidget(title)
+        evidence = QLabel("\n".join(decision.evidence))
+        evidence.setWordWrap(True)
+        evidence.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        if decision.evidence:
+            layout.addWidget(evidence)
         table = make_table(("阶段 · 组别", "灵敏度", "有效项目", "命中 / 射击", "成绩中位分"),
                            len(session.candidates))
         for index, candidate in enumerate(session.candidates):
@@ -97,11 +102,18 @@ class SuiteResults(QDialog):
         summary.setObjectName("metric")
         summary.setWordWrap(True)
         layout.addWidget(summary)
+        evidence = QLabel("\n".join(advice.evidence))
+        evidence.setWordWrap(True)
+        if advice.evidence:
+            layout.addWidget(evidence)
         table = make_table(("训练项目", "命中 / 射击", "准确率", "单项建议", "判断依据"), len(rounds))
-        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        for column in range(4):
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         for index, (stats, result) in enumerate(rounds):
             set_row(table, index, (SCENARIOS[index].title, f"{stats.hits}/{stats.attempts}",
-                                   f"{stats.accuracy:.1%}", f"{result.value:.3f} {adjustment_indicator(base, result.value)}", result.reason))
+                                   f"{stats.accuracy:.1%}", f"{result.value:.3f} {adjustment_indicator(base, result.value)}",
+                                   "\n".join((result.reason, *result.evidence))))
         layout.addWidget(table)
         close = QPushButton("关闭")
         close.clicked.connect(self.accept)

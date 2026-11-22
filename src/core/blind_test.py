@@ -12,6 +12,9 @@ ROUND_SECONDS = 15
 SCREEN_GAIN = 1.0
 VERIFY_GAIN = 2.0
 MEAN_GAIN = 3.0
+MIN_PAIRED_PROJECTS = 4
+MIN_WINS = 3
+MAX_ACCURACY_DROP = .05
 
 
 def performance(index: int, stats: ClickStats) -> float:
@@ -55,16 +58,52 @@ class Candidate:
                 for index in sorted(self.valid_indices & baseline.valid_indices)}
 
     def eligible_against(self, baseline: "Candidate", threshold: float) -> bool:
+        return not self.compare(baseline).blockers(threshold)
+
+    def compare(self, baseline: "Candidate") -> "PairEvidence":
         gains = self.gains_against(baseline)
-        return (len(gains) >= 4 and median(gains.values()) >= threshold
-                and sum(gain > 0 for gain in gains.values()) >= 3
-                and median(self.rounds[i].accuracy - baseline.rounds[i].accuracy for i in gains) >= -.05)
+        accuracy = median(self.rounds[i].accuracy - baseline.rounds[i].accuracy for i in gains) if gains else None
+        return PairEvidence(gains, accuracy)
+
+
+@dataclass(frozen=True)
+class PairEvidence:
+    gains: dict[int, float]
+    accuracy: float | None
+
+    @property
+    def wins(self) -> int:
+        return sum(gain > 0 for gain in self.gains.values())
+
+    @property
+    def gain(self) -> float:
+        return median(self.gains.values()) if self.gains else 0.
+
+    def blockers(self, threshold: float) -> tuple[str, ...]:
+        if len(self.gains) < MIN_PAIRED_PROJECTS:
+            return ("可比较项目不足四项",)
+        blockers = []
+        if self.wins < MIN_WINS:
+            blockers.append("领先项目不足三项")
+        if self.gain < threshold:
+            blockers.append(f"中位分差低于 {threshold:g} 分")
+        if self.accuracy < -MAX_ACCURACY_DROP:
+            blockers.append("准确率下降超过 5 个百分点")
+        return tuple(blockers)
+
+    def summary(self, heading: str, threshold: float) -> str:
+        counts = f"{heading} · {len(self.gains)}/{len(SCENARIOS)} 项可比较，{self.wins} 项领先"
+        if self.gains:
+            counts += f"，中位分差 {self.gain:+.2f} 分，准确率变化 {self.accuracy * 100:+.2f} 个百分点"
+        blockers = self.blockers(threshold)
+        return counts + ("。未达标项为" + "、".join(blockers) + "。" if blockers else "。")
 
 
 @dataclass(frozen=True)
 class Decision:
     recommend: Candidate
     reason: str
+    evidence: tuple[str, ...] = ()
 
 
 @dataclass
@@ -131,13 +170,16 @@ class BlindSession:
 
     def start_verification(self) -> None:
         baseline = next(group for group in self.screening if group.sensitivity == self.baseline)
-        eligible = [group for group in self.screening if group.eligible_against(baseline, SCREEN_GAIN)]
+        comparisons = [(group, group.compare(baseline)) for group in self.screening if group is not baseline]
+        eligible = [(group, evidence) for group, evidence in comparisons if not evidence.blockers(SCREEN_GAIN)]
         if not eligible:
-            reason = ("可比较项目不足四项，保留当前值。" if len(baseline.valid_indices) < 4
-                      else "初筛没有候选同时满足项目胜场、分差和准确率要求，保留当前值。")
-            self.result = Decision(baseline, reason)
+            reason = ("盲测初筛 · 两档候选都不足四项可比较，保持当前值。"
+                      if all(len(evidence.gains) < MIN_PAIRED_PROJECTS for _, evidence in comparisons)
+                      else "盲测初筛 · 没有候选通过初筛，保持当前值。")
+            details = tuple(evidence.summary(f"初筛 {group.label}", SCREEN_GAIN) for group, evidence in comparisons)
+            self.result = Decision(baseline, reason, details)
             return
-        best = max(eligible, key=lambda group: median(group.gains_against(baseline).values()))
+        best, _ = max(eligible, key=lambda item: item[1].gain)
         ordered = [group for group in reversed(self.screening) if group is baseline or group is best]
         self.verification = [Candidate(label, group.sensitivity) for label, group in zip("DE", ordered)]
         self.seeds = tuple(self.random.getrandbits(64) for _ in SCENARIOS)
@@ -147,19 +189,23 @@ class BlindSession:
         best = next(group for group in self.verification if group is not baseline)
         first_base = next(group for group in self.screening if group.sensitivity == self.baseline)
         first_best = next(group for group in self.screening if group.sensitivity == best.sensitivity)
-        gains = best.gains_against(baseline)
-        first_gains = first_best.gains_against(first_base)
-        shared = gains.keys() & first_gains.keys()
-        if len(shared) < 4:
-            self.result = Decision(baseline, "两轮共有的有效项目不足四项，保留当前值。")
+        first = first_best.compare(first_base)
+        second = best.compare(baseline)
+        shared = first.gains.keys() & second.gains.keys()
+        details = (first.summary(f"初筛 {first_best.label}", SCREEN_GAIN),
+                   second.summary(f"复核 {best.label}", VERIFY_GAIN))
+        if len(shared) < MIN_PAIRED_PROJECTS:
+            self.result = Decision(baseline, f"盲测复核 · 两阶段共同有效项目只有 {len(shared)} 项，保持当前值。", details)
             return
-        gain = median(gains.values())
-        combined = median((gains[i] + first_gains[i]) / 2 for i in shared)
-        if not best.eligible_against(baseline, VERIFY_GAIN) or combined < MEAN_GAIN:
-            self.result = Decision(baseline, f"复核中位差 {gain:+.1f} 分，未达到推荐条件，保留当前值。")
+        combined = median((second.gains[i] + first.gains[i]) / 2 for i in shared)
+        details += (f"共同有效项目 {len(shared)} 项，两阶段合计中位差 {combined:+.2f} 分（要求 ≥{MEAN_GAIN:g} 分）。",)
+        failed_verification = bool(second.blockers(VERIFY_GAIN))
+        if failed_verification or combined < MEAN_GAIN:
+            reason = ("盲测复核 · 初筛优势未通过复核门槛，保持当前值。" if failed_verification
+                      else "盲测复核 · 两阶段合计优势不足，保持当前值。")
+            self.result = Decision(baseline, reason, details)
         else:
-            self.result = Decision(best, f"复核中位差 {gain:+.1f} 分，两阶段合计中位差 {combined:+.1f} 分。"
-                                         f"建议试用 {best.sensitivity:.3f}。")
+            self.result = Decision(best, f"盲测复核 · 候选通过两阶段比较，建议试用 {best.sensitivity:.3f}。", details)
 
     def decision(self) -> Decision:
         if self.result is None:

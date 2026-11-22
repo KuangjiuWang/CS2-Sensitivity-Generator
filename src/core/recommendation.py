@@ -5,17 +5,21 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from math import exp, hypot
 from statistics import median
 
+from core.flick_analysis import MIN_DIRECTION_SAMPLES, SECTOR_LABELS
 from core.telemetry import ClickStats
 
 MATCH_KEYS = ("dpi", "aspect", "crosshair", "scenario")
 MAX_TRAINING_CHANGE = Decimal('.03')
 STATIC_TASKS = {"linear", "six", "wall", "phase"}
+MIN_TRAINING_SAMPLES = 6
+MIN_SUPPORT = .60
 
 
 @dataclass(frozen=True)
 class TrainingAdvice:
     value: float
     reason: str
+    evidence: tuple[str, ...] = ()
 
 
 def bounded_training_value(base: float, suggested: float) -> float:
@@ -38,10 +42,19 @@ def suite_advice(base: float, results: list[TrainingAdvice]) -> TrainingAdvice:
     lower = [advice.value for advice in results if advice.value < base]
     total = len(higher) + len(lower)
     aligned = max((higher, lower), key=len)
-    if len(aligned) < 2 or len(aligned) * 3 < total * 2:
-        return TrainingAdvice(base, f"六项综合 · {len(higher)} 项支持调高，{len(lower)} 项支持调低，保留当前值。")
+    votes = (f"{len(higher)} 项建议调高，{len(lower)} 项建议调低，"
+             f"{len(results) - total} 项建议保持。")
+    rule = "至少两项支持同一方向，且占所有建议调整项目的三分之二。"
+    if total == 0:
+        return TrainingAdvice(base, "六项综合 · 各项目均未给出调整建议，保持当前值。", (votes,))
+    if len(aligned) < 2:
+        return TrainingAdvice(base, "六项综合 · 同方向项目不足两项，保持当前值。", (votes, rule))
+    if len(aligned) * 3 < total * 2:
+        return TrainingAdvice(base, "六项综合 · 项目间建议方向不一致，保持当前值。", (votes, rule))
     value = bounded_training_value(base, median(aligned))
-    return TrainingAdvice(value, f"六项综合 · {len(aligned)} 项方向一致，采用其中位值，调整上限 3%。")
+    direction = "调高" if value > base else "调低"
+    reason = f"六项综合 · {len(aligned)}/{total} 项支持{direction}，取同方向建议的中位值。"
+    return TrainingAdvice(value, reason, (votes, rule))
 
 
 def training_score(points: float, elapsed: float, accuracy: float, target_rate: float) -> float:
@@ -83,19 +96,31 @@ def shot_error(angles, aim, radius: float) -> float | None:
 
 def training_advice(stats: ClickStats, base: float) -> TrainingAdvice:
     samples = stats.first_pass_errors
-    if len(samples) >= 6:
-        sectors = defaultdict(list)
-        for sector, error in samples:
-            sectors[sector].append(error)
-        sector_errors = [median(errors) for errors in sectors.values()]
-        for sign, label in ((1, "过冲"), (-1, "偏短")):
-            matching = [error for error in sector_errors if error * sign > 0]
-            support = sum(error * sign > 0 for _, error in samples)
-            if len(matching) >= 2 and len(matching) / len(sector_errors) >= .60 and support / len(samples) >= .60:
-                offset = abs(median(matching)) * .35
-                if len(stats.follow_errors) >= 6:
-                    offset = min(.03, offset) / (1 + median(stats.follow_errors))
-                value = bounded_training_value(base, base * (1 - sign * offset))
-                if value != base:
-                    return TrainingAdvice(value, f"本轮建议 · {len(matching)}/{len(sector_errors)} 个方向{label}，{support}/{len(samples)} 个样本支持")
-    return TrainingAdvice(base, f"本轮有效样本 {len(samples)}，没有足够一致的偏差，保持当前值。")
+    sectors = defaultdict(list)
+    for sector, error in samples:
+        sectors[sector].append(error)
+    sector_errors = {sector: median(errors) for sector, errors in sorted(sectors.items())}
+    low_sample = len(SECTOR_LABELS) - sum(len(errors) >= MIN_DIRECTION_SAMPLES for errors in sectors.values())
+    coverage = (f"{len(samples)} 个有效样本，覆盖 {len(sectors)}/{len(SECTOR_LABELS)} 个方向。"
+                f"{low_sample} 个方向少于 {MIN_DIRECTION_SAMPLES} 个有效样本（含未覆盖方向）。")
+    if len(samples) < MIN_TRAINING_SAMPLES:
+        return TrainingAdvice(base, f"普通训练 · 有效样本不足 {MIN_TRAINING_SAMPLES} 个，保持当前值。", (coverage,))
+
+    votes = []
+    for sign, bias, direction in ((1, "过冲", "调低"), (-1, "偏短", "调高")):
+        matching = [index for index, error in sector_errors.items() if error * sign > 0]
+        support = sum(error * sign > 0 for _, error in samples)
+        count = f"{bias}方向 {len(matching)}/{len(sectors)}，样本 {support}/{len(samples)}"
+        votes.append(count)
+        if len(matching) < 2 or len(matching) / len(sectors) < MIN_SUPPORT or support / len(samples) < MIN_SUPPORT:
+            continue
+        offset = abs(median(sector_errors[index] for index in matching)) * .35
+        if len(stats.follow_errors) >= MIN_TRAINING_SAMPLES:
+            offset = min(.03, offset) / (1 + median(stats.follow_errors))
+        value = bounded_training_value(base, base * (1 - sign * offset))
+        reason = (f"普通训练 · {len(matching)} 个方向出现{bias}倾向，建议{direction}。"
+                  if value != base else "普通训练 · 调整量过小或已到数值边界，保持当前值。")
+        names = "、".join(SECTOR_LABELS[index] for index in matching)
+        return TrainingAdvice(value, reason, (f"{count}（{names}）。", coverage))
+    reason = ("覆盖方向不足两种" if len(sectors) < 2 else "过冲或偏短未同时达到样本及方向的 60%")
+    return TrainingAdvice(base, f"普通训练 · {reason}，保持当前值。", ("。".join(votes) + "。", coverage))
