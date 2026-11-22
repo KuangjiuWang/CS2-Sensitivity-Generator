@@ -7,12 +7,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from core.raw_input import MOUSE_MOVE_ABSOLUTE, RI_MOUSE_LEFT_BUTTON_DOWN, MousePacket, RawMouseInput, WM_INPUT
-
-
 @unittest.skipUnless(sys.platform == "win32", "requires Win32 window messages")
 class RawDispatchTests(unittest.TestCase):
     def test_relative_packets_reach_callback_via_native_window(self):
+        from core.raw_input import (
+            MOUSE_MOVE_ABSOLUTE, RI_MOUSE_LEFT_BUTTON_DOWN, MousePacket, RawMouseInput, WM_INPUT,
+        )
+
         received = []
         raw = RawMouseInput(lambda dx, dy: received.append((dx, dy)),
                             on_left_down=lambda: received.append("left"))

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
+from core.blind_test import performance
 from core.crosshair import STYLES
 from core.flick_analysis import MIN_DIRECTION_SAMPLES, SECTOR_LABELS
 from core.scenarios import SCENARIOS
@@ -43,26 +44,32 @@ class BlindResults(QDialog):
     def __init__(self, session, decision, parent, *, can_apply=True):
         super().__init__(parent)
         self.setWindowTitle("盲测揭晓")
-        self.resize(1000, 450)
+        self.resize(1000, 570)
         layout = QVBoxLayout(self)
         title = QLabel(decision.reason)
         title.setObjectName("metric")
         title.setWordWrap(True)
         layout.addWidget(title)
-        table = make_table(("阶段 · 组别", "灵敏度", "表现", "准确率", "综合分"),
+        table = make_table(("阶段 · 组别", "灵敏度", "有效项目", "命中 / 射击", "成绩中位分"),
                            len(session.candidates))
         for index, candidate in enumerate(session.candidates):
             stage = "复核" if candidate in session.verification else "初筛"
             marker = " · 当前值" if candidate.sensitivity == session.baseline else ""
             if candidate is decision.recommend and not marker:
                 marker = " · 建议值"
-            stats = candidate.stats
-            detail = f"{stats.hits}/{stats.attempts} · {stats.points:.1f} 分"
+            hits = sum(stats.hits for stats in candidate.rounds.values())
+            attempts = sum(stats.attempts for stats in candidate.rounds.values())
             set_row(table, index, (f"{stage} {candidate.label}{marker}", f"{candidate.sensitivity:.3f}",
-                                  detail, f"{stats.accuracy:.1%}", f"{candidate.score:.1f}"))
+                                  f"{len(candidate.valid_indices)}/6", f"{hits}/{attempts}", f"{candidate.score:.1f}"))
         layout.addWidget(table)
-        detail = QLabel(f"{session.scenario.title} · 同轮各档共享随机种子，复核换种子。"
-                        "综合分结合单位时间得分和射击准确率。")
+        rounds = make_table(("项目", *(candidate.label for candidate in session.candidates)), len(SCENARIOS))
+        for index, scenario in enumerate(SCENARIOS):
+            set_row(rounds, index, (scenario.title, *(f"{performance(index, candidate.rounds[index]):.1f}"
+                                                     for candidate in session.candidates)))
+        rounds.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(rounds)
+        detail = QLabel("决策使用同项目的配对分差。命中和单位时间得分是基础，两档的有效样本充足时加入静态瞄准误差"
+                        "或移动靶跟随误差。至少四项可比较，候选至少赢三项。")
         detail.setWordWrap(True)
         layout.addWidget(detail)
         buttons = QHBoxLayout()

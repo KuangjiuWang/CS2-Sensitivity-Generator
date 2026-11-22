@@ -1,15 +1,19 @@
-name: Windows Release
+name: Desktop Release
 
 on:
   push:
     tags:
       - 'v*.*.*'
+    branches:
+      - main
+    paths:
+      - release/version.txt
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -35,17 +39,44 @@ jobs:
             throw "Packaged app did not exit within 60 seconds"
           }
           if ($app.ExitCode -ne 0) { throw "Packaged app exited with code $($app.ExitCode)" }
-      - name: Publish Release
-        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CS2-Sensitivity-Generator-Windows-x64
+          path: dist/CS2-Sensitivity-Generator.exe
+          if-no-files-found: error
+
+  macos:
+    uses: ./.github/workflows/macos.yml
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: CS2-Sensitivity-Generator-*
+          merge-multiple: true
+          path: assets
+      - name: Archive source
+        run: git archive --format=zip --prefix=CS2-Sensitivity-Generator/ -o assets/CS2-Sensitivity-Generator-source.zip HEAD
+      - name: Publish desktop release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $asset = "dist/CS2-Sensitivity-Generator.exe"
-          gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload "$env:RELEASE_TAG" "$asset" --clobber --repo "$env:GITHUB_REPOSITORY"
-          } else {
-            gh release create "$env:RELEASE_TAG" "$asset" --verify-tag --generate-notes --repo "$env:GITHUB_REPOSITORY"
-          }
-          exit $LASTEXITCODE
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="$GITHUB_REF_NAME"
+            target=(--verify-tag)
+          else
+            version="$(tr -d '\r\n' < release/version.txt)"
+            target=(--target "$GITHUB_SHA")
+          fi
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release create "$version" "${target[@]}" --title "$version" --generate-notes \
+            --notes-file release/notes.md \
+            assets/CS2-Sensitivity-Generator.exe \
+            assets/CS2-Sensitivity-Generator-macOS-arm64.zip \
+            assets/CS2-Sensitivity-Generator-macOS-x86_64.zip \
+            assets/CS2-Sensitivity-Generator-source.zip

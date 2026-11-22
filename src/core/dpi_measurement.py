@@ -10,11 +10,11 @@ MAX_DPI = 64000
 @dataclass
 class DpiMeasurement:
     distance_cm: float
-    net_x: int = 0
-    travel_x: int = 0
-    travel_y: int = 0
+    net_x: float = 0
+    travel_x: float = 0
+    travel_y: float = 0
 
-    def add(self, dx: int, dy: int) -> None:
+    def add(self, dx: float, dy: float) -> None:
         self.net_x += dx
         self.travel_x += abs(dx)
         self.travel_y += abs(dy)

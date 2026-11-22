@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.dpi_measurement import DpiMeasurement
-from core.raw_input import RawMouseInput
+from core.platform_input import RawMouseInput
 
 
 class DpiDialog(QDialog):
@@ -87,7 +87,7 @@ class DpiDialog(QDialog):
         self.start_button.setEnabled(False)
         self.status.setText("正在记录。水平滑到终点，停稳后按空格结束。")
 
-    def record_delta(self, dx: int, dy: int) -> None:
+    def record_delta(self, dx: float, dy: float) -> None:
         if self.measurement is not None:
             self.measurement.add(dx, dy)
 

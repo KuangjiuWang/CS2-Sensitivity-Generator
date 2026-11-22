@@ -1,4 +1,5 @@
-"""Sensitivity suggestions from comparable training results and static-target aim paths."""
+"""Sensitivity suggestions from directional and paired aiming evidence."""
+from collections import defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from math import exp, hypot
@@ -83,11 +84,18 @@ def shot_error(angles, aim, radius: float) -> float | None:
 def training_advice(stats: ClickStats, base: float) -> TrainingAdvice:
     samples = stats.first_pass_errors
     if len(samples) >= 6:
+        sectors = defaultdict(list)
+        for sector, error in samples:
+            sectors[sector].append(error)
+        sector_errors = [median(errors) for errors in sectors.values()]
         for sign, label in ((1, "过冲"), (-1, "偏短")):
-            matching = [(sector, error) for sector, error in samples if error * sign > 0]
-            if len(matching) / len(samples) >= .60 and len({sector for sector, _ in matching}) >= 2:
-                offset = abs(median(error for _, error in matching)) * .35
+            matching = [error for error in sector_errors if error * sign > 0]
+            support = sum(error * sign > 0 for _, error in samples)
+            if len(matching) >= 2 and len(matching) / len(sector_errors) >= .60 and support / len(samples) >= .60:
+                offset = abs(median(matching)) * .35
+                if len(stats.follow_errors) >= 6:
+                    offset = min(.03, offset) / (1 + median(stats.follow_errors))
                 value = bounded_training_value(base, base * (1 - sign * offset))
                 if value != base:
-                    return TrainingAdvice(value, f"本轮建议 · {len(matching)}/{len(samples)} 次有效位移{label}")
+                    return TrainingAdvice(value, f"本轮建议 · {len(matching)}/{len(sector_errors)} 个方向{label}，{support}/{len(samples)} 个样本支持")
     return TrainingAdvice(base, f"本轮有效样本 {len(samples)}，没有足够一致的偏差，保持当前值。")

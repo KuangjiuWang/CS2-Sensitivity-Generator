@@ -1,8 +1,10 @@
 # CS2 Sensitivity Generator
 
-Windows 桌面灵敏度计算器。输入当前 CS2 灵敏度，再通过全屏训练和同项盲测得出建议。也可以用 DPI、鼠标垫行程与发力习惯计算起点。导出三位小数的灵敏度、eDPI、cm/360°，可复制控制台指令、复制 CFG 或保存为 `autoexec.cfg`。
+面向 Windows 和 macOS 的桌面灵敏度计算器。输入当前 CS2 灵敏度，再通过全屏训练和同项盲测得出建议。也可以用 DPI、鼠标垫行程与发力习惯计算起点。导出三位小数的灵敏度、eDPI、cm/360°，可复制控制台指令、复制 CFG 或保存为 `autoexec.cfg`。
 
 ## 运行与发布
+
+### Windows
 
 - 预构建版本适用于 Windows 10 1809 及以上或 Windows 11（x64）。[Qt 平台支持](https://doc.qt.io/qt-6.12/windows.html)
 - 直接运行 `CS2-Sensitivity-Generator.exe` 即可，无需单独安装 Python。
@@ -21,12 +23,27 @@ cmd /c scripts\build.bat
 
 本地脚本安装依赖、运行测试并生成 `dist\CS2-Sensitivity-Generator.exe`。也可在已安装依赖的环境中直接运行 `python -m PyInstaller --clean --noconfirm build.spec`。构建配置生成单文件、无控制台窗口程序。
 
-将本目录内容提交到 GitHub，确保保留隐藏的 `.github` 目录。推送版本标签即可触发 Windows x64 构建、单元测试、EXE 启动验证与 GitHub Release 上传。
+将本目录内容提交到 GitHub，确保保留隐藏的 `.github` 目录。推送新版本标签，或在 `main` 上提交新的 `release/version.txt`，会构建并验证 Windows 和两种 macOS 版本，再把它们与源码一起发布到同一个 GitHub Release。发布说明位于 `release/notes.md`。
 
 ```text
 git tag v1.0.0
 git push origin v1.0.0
 ```
+
+### macOS
+
+构建流程以 macOS 15 为目标，分别生成 Apple 芯片（arm64）和 Intel（x86_64）版本。训练与 DPI 检测需要连接 macOS Game Controller 框架能识别的实体鼠标。Valve 的 CS2 原生版支持 Windows 和 SteamOS/Linux。macOS 上可独立运行本训练器，再把导出的 CFG 用于运行 CS2 的环境。[Apple GCMouseInput](https://developer.apple.com/documentation/gamecontroller/gcmouseinput) · [CS2 系统要求](https://store.steampowered.com/app/730/CounterStrike_2/#sysreq_app_730)
+
+在项目根目录创建环境并从源码启动。Apple 芯片上使用 arm64 Python，Intel 上使用 x86_64 Python。
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python src/main.py
+```
+
+在同一个环境中运行 `bash scripts/build-macos.sh`，生成 `dist/CS2-Sensitivity-Generator.app` 和对应架构的 ZIP。本地打包流程使用 PyInstaller 默认签名行为，未进行 Apple 公证。GitHub Actions 的「macOS Build」可以手动运行，两个安装包分别保存在该次运行的 Artifacts 中。
 
 ## 使用方法
 
@@ -63,7 +80,7 @@ git push origin v1.0.0
 
 `cm/360 = 舒适挥动距离 × 360 ÷ 转身角度`，`sensitivity = 360 × 2.54 ÷ (DPI × cm/360 × 0.022)`，`eDPI = DPI × sensitivity`。导出区的 eDPI 和 cm/360° 从三位小数的实际导出值计算。发力比例为可审查的默认假设，实际 DPI 与标称 DPI 的偏差会反映到实际物理距离。
 
-测试窗口通过 Win32 窗口过程接收 `WM_INPUT`，从前台鼠标读取相对计数。屏幕光标位置不参与计算。程序启动时启用 Per-Monitor DPI Awareness V2，全屏画布选择主界面所在显示器，隐藏光标并将它临时限制在画布范围，结束或失焦时释放限制。测试期间请只移动使用所填 DPI 的鼠标。若进入全屏后 12 秒仍未收到相对移动，程序会退出当轮并显示提示。
+Windows 通过 `WM_INPUT` 读取相对计数，并启用 Per-Monitor DPI Awareness V2。macOS 通过 `GCMouse` 读取原始相对位移，使用 Qt Cocoa 的 Retina 缩放。两端均以原始位移计算相机转角，全屏画布选择主界面所在显示器，并在测试期间隐藏和限制指针，结束或失焦时恢复。测试期间请只移动使用所填 DPI 的鼠标。若进入全屏后 12 秒仍未收到相对移动，程序会退出当轮并显示提示。[Apple 鼠标输入与光标处理](https://github.com/apple/game-porting-toolkit/blob/main/game-porting-skills/skills/setting-up-macos-window/references/mouse-and-cursor.md)
 
 横向转角为 `dx × sensitivity × 0.022`，纵向按 CS2 默认俯仰比例计算。准星固定在视口中心，虚拟相机旋转后，将目标相对于相机的横纵坐标除以深度，再以对应半视场角的正切映射到视口。无开镜垂直 FOV 为 73.74°，水平 FOV 为：
 
@@ -94,13 +111,13 @@ git push origin v1.0.0
 
 参考资料：[Sixshot 官方榜单](https://aimlabs.com/leaderboards?taskId=sixshot&weaponId=9mm) · [Wide Wide Wall 创意工坊](https://steamcommunity.com/sharedfiles/filedetails/?id=2530722232) · [Aimlabs Phaseshot 指南](https://aimlabs.com/articles/aimlabs-academy/fine-tune-your-precision-in-valorant-to-hit-more-headshots/) · [Aimlabs VCT 任务列表](https://aimlabs.com/articles/aimlabs/the-10-most-popular-aimlabs-tasks-in-november/)
 
-Win32 Raw Input 同时读取原始移动和左键按下。命中按点击当时的准星位置判定。点偏记一次射击，可再次瞄准；第六项的移动小靶仅在命中后刷新。第一项额外按到达目标的轨迹直达率计分，训练时省去轨迹线。
+训练场从平台原生输入同时读取原始移动和左键按下。命中按点击当时的准星位置判定。点偏记一次射击，可再次瞄准。第六项的移动小靶仅在命中后刷新。第一项额外按到达目标的轨迹直达率计分，训练时省去轨迹线。
 
 ### 普通训练建议
 
 「推荐与导出」里的「推荐说明」会解释三种测算方式、保留当前值的条件和如何应用建议。
 
-完成一轮普通训练后，只用本轮数据给出建议。固定靶优先看首段位移，移动靶看开枪瞬间的瞄准偏差。至少需要 6 个有效样本。过冲或偏短达到有效样本的 60%，并覆盖至少两个方向时，才建议调低或调高。建议幅度最多 3%，不足时保留当前值。
+完成一轮普通训练后，只用本轮数据给出建议。固定靶优先看首段位移，移动靶看开枪瞬间的瞄准偏差。至少需要 6 个有效样本。过冲或偏短同时达到有效样本和参与方向数的 60%，且获至少两个方向支持时，才建议调低或调高。移动靶有足够跟随样本时，速度差越大，微调越小。建议幅度最多 3%，不足时保留当前值。
 
 推荐值旁的 ↑ 表示调高，↓ 表示调低，百分比按实际导出值计算。点击应用可更新软件里的步枪灵敏度，也能复制 `sensitivity` 指令。
 
@@ -108,11 +125,13 @@ Win32 Raw Input 同时读取原始移动和左键按下。命中按点击当时�
 
 点击「一键测试六项」后，按原顺序以当前步枪灵敏度完成全部项目，每项使用所选时长。每项完成后保存成绩，全部结束后显示各项建议和综合值。至少两项支持同一方向，且占有方向建议的项目至少三分之二时，取这些建议的中位值，综合调整最多 3%。证据不足或方向冲突时保留当前值。按 Esc 可取消，已完成的项目仍保留。
 
-### 同项盲测 A/B/C
+### 六项盲测 A/B/C
 
-从选中的训练项目开始。每档 15 秒，默认以当前灵敏度 ±5% 作三档初筛。同轮各档共用随机种子；点靶项目各个靶位共享对应的随机序列，命中时间会影响换靶时刻。有领先候选时反转它与当前值的出场顺序，用新的种子复核。
+以当前值和两档候选进行初筛。每档按固定顺序完成六项，每项 15 秒。同阶段，同项目使用相同种子。初筛结束后，有合格候选时，候选与当前值交换先后顺序，再各测完整六项，复核使用新种子。
 
-盲测综合分结合单位时间得分和射击准确率。每档至少点中 6 靶。候选准确率最多下降 5 个百分点。初筛领先至少 1 分、复核领先至少 2 分、两轮平均领先至少 3 分时才建议试用。
+按同项目成对比较成绩，取差值中位数，防止单项高分主导推荐。基础分结合单位时间得分和准确率。双方各有至少 6 个有效瞄准样本时，20% 权重用于静态瞄准偏差或移动靶的短时跟随位移误差。每轮至少 4 项可比较，候选至少赢 3 项，准确率下降的中位数不能超过 5 个百分点。初筛中位差至少 1 分，复核至少 2 分，两轮合计中位差至少 3 分，才推荐实测过的候选值。普通训练和一键六项仍使用 3% 微调上限。
+
+评估维度参考 [Aimlabs Sensitivity Finder 官方说明](https://aimlabs.com/articles/aimlabs/aimlabs-mouselabs-explained-smarter-sensitivity-finder-better-results/)，评分和阈值由本项目设定。
 
 ### 16 方向点靶分析
 
@@ -120,14 +139,15 @@ Win32 Raw Input 同时读取原始移动和左键按下。命中按点击当时�
 
 ### 本地历史
 
-每轮完成后将 DPI、灵敏度、准星及可用的 16 方向统计保存到 Windows 本地应用数据目录的 `practice-history.json`，同时记住当前配置。盲测完成后按训练项目分别保存初筛三档和已完成的复核两档。历史面板可选择任意两轮，按方向对比命中率、反应、定位、过冲、直达率和横偏。点击右上角「清除所有历史」后需确认，确认后仍保留当前配置。
+每轮完成后将 DPI、灵敏度、准星及可用的 16 方向统计保存到系统本地应用数据目录的 `practice-history.json`，同时记住当前配置。盲测完成后按训练项目分别保存初筛三档和已完成的复核两档。历史面板可选择任意两轮，按方向对比命中率、反应、定位、过冲、直达率和横偏。点击右上角「清除所有历史」后需确认，确认后仍保留当前配置。
 
 ## 工程结构
 
-- `src/core/` 包含 Win32 输入、摄像机和数值模型、遥测统计。
+- `src/core/` 包含 Win32 与 macOS 原生输入、摄像机和数值模型、遥测统计。
 - `src/ui/` 包含参数与导出界面、全屏测试场。
 - `tests/` 覆盖物理换算、视场角、投影、跨目标判定和统计。
-- `scripts/`、`build.spec` 和 `.github/workflows/release.yml` 提供 Windows 构建发布流程。
+- `scripts/` 和 `build.spec` 提供 Windows 本地构建流程，`.github/workflows/release.yml` 统一发布各平台版本。
+- `scripts/build-macos.sh` 和 `.github/workflows/macos.yml` 提供 macOS 构建流程。
 
 ## 协议与参考
 

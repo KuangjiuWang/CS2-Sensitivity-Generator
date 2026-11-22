@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from core.cs2_math import (
     PRESETS, cfg_text, cm_per_360, console_text, edpi, physical_baseline,
 )
-from core.blind_test import BlindSession, ROUND_SECONDS
+from core.blind_test import BlindSession, ROUND_SECONDS, performance
 from core.config_export import crosshair_cfg_text
 from core.crosshair import Crosshair, STYLES
 from core.dpi_measurement import MAX_DPI, MIN_DPI
@@ -202,12 +202,12 @@ class MainWindow(QWidget):
         self.blind_step = decimal(.5, 25, 5, 1, .5)
         self.blind_step.setSuffix(" %")
         blind_row.addWidget(self.blind_step)
-        self.blind_button = QPushButton("开始 A/B/C 盲测")
+        self.blind_button = QPushButton("开始六项 A/B/C 盲测")
         self.blind_button.setObjectName("primary")
         self.blind_button.clicked.connect(self.start_blind)
         blind_row.addWidget(self.blind_button, 1)
         practice_layout.addLayout(blind_row)
-        practice_layout.addWidget(label("用所选训练比较 3 档，每档 15 秒。领先候选用新目标复核，之后统一揭晓。", "muted", True))
+        practice_layout.addWidget(label("每档按原顺序测六项，每项 15 秒。初筛约 5 分钟，复核另需约 4 分钟。", "muted", True))
 
         players, players_layout = card("选手灵敏度预设")
         self.sensitivity_panel = PlayerSensitivityPanel()
@@ -482,17 +482,34 @@ class MainWindow(QWidget):
         self.settings_timer.start()
 
     def launch(self, scenario, *, sensitivity=None, seed=None, stage="", seconds=None) -> None:
-        if self.arena is not None:
-            return
         duration = seconds if seconds is not None else (
             self.duration.currentData() if sensitivity is None else ROUND_SECONDS)
-        self.arena = AimArena(scenario, self.initial_sensitivity.value() if sensitivity is None else sensitivity,
-                              self.aspect.currentData(), duration, self.crosshair(),
-                              seed=self.random.getrandbits(64) if seed is None else seed,
-                              stage=stage)
+        value = self.initial_sensitivity.value() if sensitivity is None else sensitivity
+        seed = self.random.getrandbits(64) if seed is None else seed
+        continuous = self.suite is not None or self.blind is not None
+        if self.arena is not None:
+            if continuous and self.arena.done:
+                self.arena.set_round(scenario, value, duration, seed, stage)
+            return
+        self.arena = AimArena(scenario, value, self.aspect.currentData(), duration, self.crosshair(),
+                              seed=seed, stage=stage, continuous=continuous)
         self.arena.finished.connect(self.arena_finished)
+        if continuous:
+            self.arena.round_finished.connect(self.continuous_round_finished)
         self.content.setEnabled(False)
         self.arena.open_on(self.screen())
+
+    def continuous_round_finished(self, stats) -> None:
+        if self.blind is not None:
+            self.finish_blind_phase(stats, "")
+        elif self.suite is not None:
+            self.finish_suite_round(stats, "")
+
+    def close_completed_arena(self) -> None:
+        arena, self.arena = self.arena, None
+        arena.finished.disconnect(self.arena_finished)
+        arena.close()
+        arena.deleteLater()
 
     def arena_finished(self, stats, error: str) -> None:
         arena, self.arena = self.arena, None
@@ -549,6 +566,7 @@ class MainWindow(QWidget):
         if len(suite.rounds) < len(SCENARIOS):
             QTimer.singleShot(100, self.launch_suite_round)
             return
+        self.close_completed_arena()
         self.suite = None
         base = suite.settings["sensitivity"]
         advice = suite_advice(base, [result for _, result in suite.rounds])
@@ -573,12 +591,11 @@ class MainWindow(QWidget):
         if self.arena is not None or self.blind is not None or self.suite is not None:
             return
         try:
-            self.blind = BlindSession.create(self.initial_sensitivity.value(), self.blind_step.value(), self.random,
-                                             self.scenario.currentData())
+            self.blind = BlindSession.create(self.initial_sensitivity.value(), self.blind_step.value(), self.random)
         except ValueError as error:
             self.notify(str(error))
             return
-        self.blind.settings = self.snapshot()
+        self.blind.settings = {key: value for key, value in self.snapshot().items() if key != "scenario"}
         self.launch_blind_phase()
 
     def launch_blind_phase(self) -> None:
@@ -599,17 +616,19 @@ class MainWindow(QWidget):
         if not self.blind.record(stats):
             QTimer.singleShot(100, self.launch_blind_phase)
             return
+        self.close_completed_arena()
         self.last_blind, self.blind = self.blind, None
         self.last_training = None
         session = self.last_blind
         decision = session.decision()
         entries = [
-            record("blind", {**session.settings, "sensitivity": candidate.sensitivity},
-                   candidate.stats, None,
-                   name=f"{session.scenario.title} · {'复核' if candidate in session.verification else '初筛'} {candidate.label}",
-                   score=candidate.score,
+            record("blind", {**session.settings, "sensitivity": candidate.sensitivity, "scenario": index},
+                   stats, None,
+                   name=f"{SCENARIOS[index].title} · {'复核' if candidate in session.verification else '初筛'} {candidate.label}",
+                   score=performance(index, stats),
                    conclusion=decision.reason)
             for candidate in session.candidates
+            for index, stats in candidate.rounds.items()
         ]
         error = self.save_history(*entries)
         self.content.setEnabled(True)
@@ -646,8 +665,8 @@ class MainWindow(QWidget):
             "取同方向建议的中位值，幅度最多 3%。", wrap=True))
         layout.addWidget(label("A/B/C 盲测", "section"))
         layout.addWidget(label(
-            f"比较当前值和两档候选，每档 {ROUND_SECONDS} 秒。领先候选会用新一组目标和当前值复核，"
-            "两轮优势达到门槛后才会推荐。候选范围由盲测浮动设置决定。", wrap=True))
+            f"比较当前值和两档候选，每档依次完成六项，每项 {ROUND_SECONDS} 秒。"
+            "候选需在多项领先，并用新种子完成六项复核。评分结合命中、得分效率和有效瞄准误差。", wrap=True))
         layout.addWidget(label(
             "证据不足时会保留当前值。点击「应用建议」会更新软件里的步枪灵敏度。"
             "复制灵敏度 CFG 后，可把 sensitivity 指令粘贴到 CS2 控制台。", "muted", True))

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from core.blind_test import BlindSession
+from core.blind_test import BlindSession, paired_gain
 from core.config_export import crosshair_cfg_text
 from core.crosshair import Crosshair
 from core.flick_analysis import FlickTrial
@@ -57,43 +57,58 @@ class BlindWorkflowTests(unittest.TestCase):
         self.assertEqual(adjustment_indicator(1.15, 1.15), "保持")
 
     def test_candidates_are_blind_and_share_the_stage_seed(self):
-        session = BlindSession.create(1.15, 5, Random(42), SCENARIOS[0])
+        session = BlindSession.create(1.15, 5, Random(42))
         self.assertEqual(sorted(candidate.sensitivity for candidate in session.candidates),
                          [1.093, 1.15, 1.208])
-        seed = session.seed
-        for phase in range(3):
-            self.assertEqual(session.seed, seed)
-            self.assertEqual(capture_phase(session), phase == 2)
+        seeds = session.seeds
+        for phase in range(18):
+            self.assertEqual(session.index, phase % 6)
+            self.assertEqual(session.scenario, SCENARIOS[phase % 6])
+            self.assertEqual(session.seed, seeds[phase % 6])
+            self.assertEqual(capture_phase(session), phase == 17)
         self.assertEqual(session.decision().recommend.sensitivity, 1.15)
 
     def test_verifies_with_fresh_seed_and_reversed_order(self):
-        session = BlindSession.create(1, 5, Random(12), SCENARIOS[0])
-        seed = session.seed
-        for _ in range(3):
-            self.assertFalse(capture_phase(session, candidate_track=15))
-        self.assertEqual(session.progress, "复核 1/2")
+        session = BlindSession.create(1, 5, Random(12))
+        seeds = session.seeds
+        for _ in range(18):
+            self.assertFalse(capture_phase(session, candidate_track=18))
+        self.assertEqual(session.progress, "复核 1/12")
         expected = [group.sensitivity for group in reversed(session.screening) if group.sensitivity >= 1]
         self.assertEqual([group.sensitivity for group in session.verification], expected)
-        self.assertNotEqual(FixedWave(SCENARIOS[0], seed).targets, FixedWave(SCENARIOS[0], session.seed).targets)
-        self.assertFalse(capture_phase(session, candidate_track=15))
-        self.assertTrue(capture_phase(session, candidate_track=15))
+        self.assertTrue(set(seeds).isdisjoint(session.seeds))
+        for index in range(12):
+            self.assertEqual(session.index, index % 6)
+            self.assertEqual(capture_phase(session, candidate_track=18), index == 11)
         self.assertEqual(session.decision().recommend.sensitivity, 1.05)
 
     def test_keeps_baseline_on_close_verification(self):
-        session = BlindSession.create(1, 5, Random(12), SCENARIOS[0])
-        for _ in range(3):
-            capture_phase(session, candidate_track=15)
-        for _ in range(2):
+        session = BlindSession.create(1, 5, Random(12))
+        for _ in range(18):
+            capture_phase(session, candidate_track=18)
+        for _ in range(12):
             capture_phase(session, candidate_track=8.4)
         self.assertEqual(session.decision().recommend.sensitivity, 1)
 
     def test_click_scoring_rejects_faster_but_significantly_less_accurate(self):
-        session = BlindSession.create(1, 5, Random(12), SCENARIOS[2])
-        for _ in range(3):
+        session = BlindSession.create(1, 5, Random(12))
+        for _ in range(18):
             better = session.current.sensitivity > session.baseline
             session.record(ClickStats(elapsed=15, hits=18 if better else 12,
                                       attempts=30 if better else 13, points=18 if better else 12))
         self.assertEqual(session.decision().recommend.sensitivity, 1)
+
+    def test_precision_tiebreaker_requires_matched_samples(self):
+        better = ClickStats(elapsed=15, hits=12, attempts=12, points=12)
+        worse = ClickStats(elapsed=15, hits=12, attempts=12, points=12)
+        better.follow_errors = [.15] * 6
+        worse.follow_errors = [.55] * 6
+        self.assertGreater(paired_gain(1, better, worse), 0)
+        worse.follow_errors.pop()
+        self.assertEqual(paired_gain(1, better, worse), 0)
+        better.first_pass_errors = [(0, .02)] * 6
+        worse.first_pass_errors = [(0, -.09)] * 6
+        self.assertGreater(paired_gain(0, better, worse), 0)
 
     def test_six_scenarios_keep_order_and_distinct_target_rules(self):
         self.assertEqual([spec.key for spec in SCENARIOS], ["linear", "micro", "six", "wall", "phase", "moving"])

@@ -1,7 +1,7 @@
-"""Windows entry point. Declare DPI awareness before initializing Qt."""
+"""Desktop entry point. Configure native display handling before initializing Qt."""
 import sys
 
-from core.raw_input import enable_high_dpi
+from core.platform_input import enable_high_dpi
 
 
 def main() -> int:
@@ -18,6 +18,9 @@ def main() -> int:
     window = MainWindow()
     window.show()
     if "--smoke-test" in sys.argv:
+        if sys.platform == "darwin":
+            from core.platform_input import RawMouseInput
+            RawMouseInput(lambda dx, dy: None)
         QTimer.singleShot(300, app.quit)
     return app.exec()
 
