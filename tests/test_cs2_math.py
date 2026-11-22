@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from core.cs2_math import (Camera, PRESETS, PROFILES, cfg_text, cm_per_360,
                            console_text, edpi,
-                           physical_baseline, segment_hit, sensitivity_for_cm)
+                           physical_baseline, sensitivity_for_cm)
 from core.telemetry import FlickStats, TrackingStats
 
 
@@ -31,8 +31,8 @@ class SensitivityTests(unittest.TestCase):
                 cm_per_360(value, 1)
 
     def test_export_uses_same_three_decimal_values(self):
-        self.assertEqual(cfg_text(1.2344, 1), 'sensitivity "1.234"\nzoom_sensitivity_ratio "1.000"\n')
-        self.assertEqual(console_text(1.2344, 1), 'sensitivity "1.234"; zoom_sensitivity_ratio "1.000"')
+        self.assertEqual(cfg_text(1.2344), 'sensitivity "1.234"\n')
+        self.assertEqual(console_text(1.2344), 'sensitivity "1.234"')
 
 
 class ProjectionTests(unittest.TestCase):
@@ -62,11 +62,6 @@ class ProjectionTests(unittest.TestCase):
         x, y = camera.project(camera.ray(-.22, .43))
         self.assertAlmostEqual(x, -.22)
         self.assertAlmostEqual(y, .43)
-
-    def test_segment_crossing_registers_even_when_both_ends_are_outside(self):
-        self.assertAlmostEqual(segment_hit((-.2, 0), (.2, 0), .04), .4)
-        self.assertIsNone(segment_hit((-.2, .1), (.2, .1), .04))
-        self.assertEqual(segment_hit((0, 0), (0, 0), .04), 0)
 
 
 class TelemetryTests(unittest.TestCase):

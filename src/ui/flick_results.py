@@ -13,7 +13,6 @@ from ui.comparison import milliseconds
 
 CYAN = "#6ADCE8"
 LIME = "#D8F576"
-SUPPLEMENT = 2
 
 
 class SectorPlot(QWidget):
@@ -89,11 +88,11 @@ class AimTracePlot(QWidget):
 class FlickResults(QDialog):
     def __init__(self, stats, parent):
         super().__init__(parent)
-        self.setWindowTitle("16 方向 · 轨迹与拉枪分析")
+        self.setWindowTitle("16 方向 · 轨迹与点靶分析")
         self.resize(1140, 660)
         self.sectors = stats.sectors
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"拉枪命中 {stats.hits}/{stats.attempts}   ·   "
+        layout.addWidget(QLabel(f"点靶命中 {stats.hits}/{stats.attempts}   ·   "
                                 f"覆盖 {sum(bool(sector.attempts) for sector in self.sectors)}/16 个方向"))
         columns = QHBoxLayout()
         layout.addLayout(columns, 1)
@@ -144,12 +143,7 @@ class FlickResults(QDialog):
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
         close.rejected.connect(self.reject)
-        missing = len(stats.missing_directions())
-        self.supplement_button = QPushButton(f"一键补测样本不足方向（{missing} 个目标）")
-        self.supplement_button.setObjectName("primary")
-        self.supplement_button.setEnabled(bool(missing))
-        self.supplement_button.clicked.connect(lambda: self.done(SUPPLEMENT))
-        close.addButton(self.supplement_button, QDialogButtonBox.ButtonRole.ActionRole)
+
         layout.addWidget(close)
         self.samples.currentIndexChanged.connect(self.show_trace)
         self.table.currentCellChanged.connect(self.show_sector)

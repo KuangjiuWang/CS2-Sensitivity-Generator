@@ -81,6 +81,7 @@ class FlickTrial:
         self.distance = hypot(*target)
         self.direction = (target[0] / self.distance, target[1] / self.distance)
         self.hit_time = None
+        self.shot_time = None
         self.onset = None
         self.points = [(0.0, 0.0)]
         self.contact = None
@@ -91,25 +92,17 @@ class FlickTrial:
         self.deviation = 0.0
         self.peak = 0.0
 
-    def move(self, point: Point, now: float, hit_fraction: float | None) -> None:
+    def move(self, point: Point, now: float) -> None:
         last_x, last_y = self.last_point
         x, y = point
         x = last_x + ((x - last_x + 180) % 360 - 180)
         point = (x, y)
-        if self.hit_time is None:
-            fraction = 1.0 if hit_fraction is None else hit_fraction
-            end_x = last_x + fraction * (x - last_x)
-            end_y = last_y + fraction * (y - last_y)
-            if self.onset is None and hypot(end_x, end_y) >= REACTION_THRESHOLD_DEG:
+        if self.shot_time is None:
+            if self.onset is None and hypot(x, y) >= REACTION_THRESHOLD_DEG:
                 self.onset = now
-            self.path_length += hypot(end_x - last_x, end_y - last_y)
+            self.path_length += hypot(x - last_x, y - last_y)
             direction_x, direction_y = self.direction
-            self.deviation = max(self.deviation, abs(end_x * direction_y - end_y * direction_x))
-            if hit_fraction is not None:
-                self.hit_time = now
-                self.contact = len(self.points)
-                self.points.append((end_x, end_y))
-                self.efficiency = min(1.0, hypot(end_x, end_y) / self.path_length) if self.path_length else 0
+            self.deviation = max(self.deviation, abs(x * direction_y - y * direction_x))
         if self.hit_time is not None:
             along = x * self.direction[0] + y * self.direction[1]
             self.peak = max(self.peak, along - self.distance - self.radius)
@@ -117,6 +110,15 @@ class FlickTrial:
             self.points.append(point)
             self.last_sample = now
         self.last_point = point
+
+    def shoot(self, now: float, hit: bool) -> None:
+        self.shot_time = now
+        if hit:
+            self.hit_time = now
+            self.contact = len(self.points)
+            self.points.append(self.last_point)
+            if self.path_length:
+                self.efficiency = min(1.0, hypot(*self.last_point) / self.path_length)
 
     def trace(self) -> FlickTrace:
         points = self.points if self.last_point == self.points[-1] else [*self.points, self.last_point]

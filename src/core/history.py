@@ -5,14 +5,17 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from core.telemetry import FlickStats, TrackingStats
+from PySide6.QtCore import QLockFile
+
+from core.telemetry import ClickStats, FlickStats, TrackingStats
 
 
 def flick_report(stats: FlickStats | None) -> dict | None:
     if stats is None:
         return None
     return {
-        "attempts": stats.attempts, "hits": stats.hits,
+        "method": "scenario" if isinstance(stats, ClickStats) else "click", "attempts": stats.attempts, "hits": stats.hits,
+        **({"points": stats.points, "elapsed": stats.elapsed} if isinstance(stats, ClickStats) else {}),
         "mean_latency": stats.mean_latency if stats.hits else None,
         "mean_overshoot": stats.mean_overshoot if stats.completed_overshoots else None,
         "timings": stats.timings(),
@@ -43,32 +46,54 @@ class HistoryStore:
         self.settings = {}
         self.records = []
         self.error = ""
+        self.reload()
+
+    def _read(self) -> tuple[dict, list]:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if (not isinstance(data, dict) or data.get("version") != 1
-                    or not isinstance(data.get("settings"), dict) or not isinstance(data.get("records"), list)):
-                raise ValueError("无法识别本地历史文件格式")
-            self.settings = data["settings"]
-            self.records = data["records"]
+            data = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            pass
+            return {}, []
+        if (not isinstance(data, dict) or data.get("version") != 1
+                or not isinstance(data.get("settings"), dict) or not isinstance(data.get("records"), list)):
+            raise ValueError("无法识别本地历史文件格式")
+        return data["settings"], data["records"]
+
+    def reload(self) -> None:
+        try:
+            self.settings, self.records = self._read()
         except (OSError, ValueError) as error:
             self.error = str(error)
+        else:
+            self.error = ""
 
     def save(self, settings: dict) -> None:
         if settings != self.settings:
-            self._write(settings, self.records)
+            self._update(settings)
 
     def append(self, *records: dict, settings: dict) -> None:
-        self._write(settings, [*self.records, *records])
+        self._update(settings, records)
 
     def clear(self) -> None:
-        self._write(self.settings, [], recover=True)
+        self._update(clear=True)
 
-    def _write(self, settings: dict, records: list[dict], *, recover: bool = False) -> None:
-        if self.error and not recover:
-            raise OSError(self.error)
+    def _update(self, settings: dict | None = None, additions: tuple = (), *, clear=False) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock = QLockFile(str(self.path.with_name(self.path.name + ".lock")))
+        if not lock.tryLock(500):
+            raise OSError("暂时无法锁定历史文件，请稍后重试。")
+        try:
+            try:
+                saved_settings, records = self._read()
+            except ValueError as error:
+                if not clear:
+                    raise OSError(str(error)) from error
+                saved_settings, records = self.settings, []
+            self._write(saved_settings if settings is None else settings,
+                        [] if clear else [*records, *additions])
+        finally:
+            lock.unlock()
+
+    def _write(self, settings: dict, records: list) -> None:
         temp_path = self.path.parent / f".{uuid4().hex}.tmp"
         stream = temp_path.open("x", encoding="utf-8")
         try:

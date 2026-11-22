@@ -1,34 +1,33 @@
 """Main parameter, practice and export workflow."""
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from random import Random
 
 from PySide6.QtCore import QSignalBlocker, QStandardPaths, Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from core.cs2_math import (
-    PRESETS, cfg_text, cm_per_360, edpi, physical_baseline,
+    PRESETS, cfg_text, cm_per_360, console_text, edpi, physical_baseline,
 )
-from core.blind_test import BlindSession, TRACK_SECONDS
+from core.blind_test import BlindSession, ROUND_SECONDS
 from core.config_export import crosshair_cfg_text
 from core.crosshair import Crosshair, STYLES
 from core.dpi_measurement import MAX_DPI, MIN_DPI
 from core.history import HistoryStore, record
 from core.player_crosshairs import CrosshairPreset
 from core.player_sensitivity import SensitivityPreset
-from core.practice_plan import flick_plan
-from core.tracking_path import (
-    DEFAULT_DIAMETER_DEG, DEFAULT_DISTANCE, WEAPON_SPEEDS, center_angular_speed,
-)
-from ui.aim_arena import AimArena, FLICK_TIMEOUT
-from ui.comparison import APPLY_BLIND_RESULT, BlindResults, HistoryDialog, milliseconds
+from core.recommendation import MATCH_KEYS, TrainingAdvice, adjustment_indicator, suite_advice, training_advice
+from core.scenarios import SCENARIOS, TRAINING_DURATIONS
+from core.telemetry import ClickStats
+from ui.aim_arena import AimArena
+from ui.comparison import APPLY_BLIND_RESULT, BlindResults, HistoryDialog, SuiteResults, milliseconds
 from ui.crosshair import CrosshairEditor, CrosshairPreview
 from ui.dpi_dialog import DpiDialog
-from ui.flick_results import FlickResults, SUPPLEMENT
+from ui.flick_results import FlickResults
 from ui.preset_panels import PlayerCrosshairPanel, PlayerSensitivityPanel
 from ui.toast import Toast
 
@@ -91,6 +90,14 @@ def decimal(minimum: float, maximum: float, value: float, places: int, step: flo
     return widget
 
 
+@dataclass
+class SuiteRun:
+    settings: dict
+    seconds: int
+    rounds: list[tuple[ClickStats, TrainingAdvice]] = field(default_factory=list)
+    save_error: str = ""
+
+
 class MainWindow(QWidget):
     def __init__(self, history_path: Path | None = None):
         super().__init__()
@@ -99,12 +106,13 @@ class MainWindow(QWidget):
         self.setMinimumSize(720, 560)
         self.arena = None
         self.flick = None
-        self.tracking = None
         self.crosshair_settings = Crosshair()
         self.recommendation = 0.0
         self.blind = None
         self.last_blind = None
-        self.supplementing = False
+        self.last_training = None
+        self.suite = None
+        self.last_suite = None
         self.closing = False
         self.random = Random()
         app_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
@@ -153,7 +161,7 @@ class MainWindow(QWidget):
         for preset in PRESETS:
             self.aspect.addItem(f"{preset.label} · {preset.horizontal_fov:.2f}°", preset)
         form.addRow("鼠标 DPI", dpi_controls)
-        form.addRow("当前 CS2 灵敏度", self.initial_sensitivity)
+        form.addRow("当前步枪灵敏度", self.initial_sensitivity)
         form.addRow("鼠标垫有效横向宽度", self.pad)
         form.addRow("发力习惯", self.profile)
         form.addRow("CS2 画面比例", self.aspect)
@@ -167,37 +175,28 @@ class MainWindow(QWidget):
         practice, practice_layout = card("全屏训练与盲测")
         grid.addWidget(practice, 0, 1)
         self.duration = QComboBox()
-        for seconds in (15, 30, 60):
+        for seconds in TRAINING_DURATIONS:
             self.duration.addItem(f"{seconds} 秒 / 项", seconds)
-        self.tracking_speed = QComboBox()
-        for title, speed in WEAPON_SPEEDS:
-            self.tracking_speed.addItem(f"{title} · {speed} u/s", speed)
-        self.tracking_distance = integer(300, 1600, DEFAULT_DISTANCE)
-        self.tracking_distance.setSingleStep(50)
-        self.tracking_distance.setSuffix(" u")
-        self.tracking_diameter = decimal(.5, 5, DEFAULT_DIAMETER_DEG, 1, .1)
-        self.tracking_diameter.setSuffix("°")
         duration_form = QFormLayout()
+        self.scenario = QComboBox()
+        for index, scenario in enumerate(SCENARIOS, 1):
+            self.scenario.addItem(f"{index}. {scenario.title}", scenario)
+        duration_form.addRow("训练项目", self.scenario)
         duration_form.addRow("单项时长", self.duration)
-        duration_form.addRow("跟枪目标移速", self.tracking_speed)
-        duration_form.addRow("跟枪目标距离", self.tracking_distance)
-        duration_form.addRow("跟枪目标直径", self.tracking_diameter)
         practice_layout.addLayout(duration_form)
-        self.tracking_hint = label(style="muted")
-        practice_layout.addWidget(self.tracking_hint)
-        self.flick_button = QPushButton("开始悬停拉枪")
-        self.flick_button.setObjectName("primary")
-        self.flick_button.clicked.connect(lambda: self.launch("flick"))
-        self.tracking_button = QPushButton("开始动态跟枪")
-        self.tracking_button.clicked.connect(lambda: self.launch("tracking"))
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.flick_button)
-        buttons.addWidget(self.tracking_button)
-        practice_layout.addLayout(buttons)
+        self.scenario_hint = label(style="muted", wrap=True)
+        practice_layout.addWidget(self.scenario_hint)
+        self.practice_button = QPushButton("开始所选训练")
+        self.practice_button.setObjectName("primary")
+        self.practice_button.clicked.connect(lambda: self.launch(self.scenario.currentData()))
+        practice_layout.addWidget(self.practice_button)
+        self.suite_button = QPushButton("一键测试六项")
+        self.suite_button.clicked.connect(self.start_suite)
+        practice_layout.addWidget(self.suite_button)
+        practice_layout.addWidget(label("按顺序测试全部六项，每项使用所选时长与当前灵敏度。",
+                                        "muted", True))
         self.flick_line = label(style="muted", wrap=True)
-        self.track_line = label(style="muted", wrap=True)
         practice_layout.addWidget(self.flick_line)
-        practice_layout.addWidget(self.track_line)
         blind_row = QHBoxLayout()
         blind_row.addWidget(label("盲测浮动"))
         self.blind_step = decimal(.5, 25, 5, 1, .5)
@@ -208,7 +207,7 @@ class MainWindow(QWidget):
         self.blind_button.clicked.connect(self.start_blind)
         blind_row.addWidget(self.blind_button, 1)
         practice_layout.addLayout(blind_row)
-        practice_layout.addWidget(label("先测 3 档。有领先候选时换场景复核两档，最后统一揭晓。约 2.5–4.5 分钟。", "muted", True))
+        practice_layout.addWidget(label("用所选训练比较 3 档，每档 15 秒。领先候选用新目标复核，之后统一揭晓。", "muted", True))
 
         players, players_layout = card("选手灵敏度预设")
         self.sensitivity_panel = PlayerSensitivityPanel()
@@ -238,10 +237,14 @@ class MainWindow(QWidget):
         self.summary = label(style="muted", wrap=True)
         export_layout.addWidget(self.metrics)
         export_layout.addWidget(self.summary)
-        self.zoom = decimal(.01, 10, 1, 3, .01)
-        zoom_form = QFormLayout()
-        zoom_form.addRow("开镜倍率（手动设定）", self.zoom)
-        export_layout.addLayout(zoom_form)
+        self.apply_recommendation = QPushButton("应用建议到当前步枪灵敏度")
+        self.apply_recommendation.clicked.connect(self.apply_current_recommendation)
+        self.recommendation_help = QPushButton("推荐说明")
+        self.recommendation_help.clicked.connect(self.show_recommendation_help)
+        recommendation_actions = QHBoxLayout()
+        recommendation_actions.addWidget(self.apply_recommendation, 1)
+        recommendation_actions.addWidget(self.recommendation_help)
+        export_layout.addLayout(recommendation_actions)
         self.cfg = QPlainTextEdit()
         self.cfg.setAccessibleName("autoexec.cfg 配置片段")
         self.cfg.setReadOnly(True)
@@ -273,6 +276,9 @@ class MainWindow(QWidget):
         self.reveal_button = QPushButton("查看最近盲测结果")
         self.reveal_button.clicked.connect(self.show_blind_results)
         result_actions.addWidget(self.reveal_button)
+        self.suite_results_button = QPushButton("查看六项结果")
+        self.suite_results_button.clicked.connect(self.show_suite_results)
+        result_actions.addWidget(self.suite_results_button)
         result_actions.addWidget(self.clear_button)
         results_layout.addLayout(result_actions)
 
@@ -287,11 +293,8 @@ class MainWindow(QWidget):
             widget.currentIndexChanged.connect(self.settings_changed)
         self.pad.valueChanged.connect(self.refresh)
         self.profile.currentIndexChanged.connect(self.refresh)
-        self.zoom.valueChanged.connect(self.refresh)
         self.blind_step.valueChanged.connect(self.refresh)
-        self.tracking_speed.currentIndexChanged.connect(self.tracking_settings_changed)
-        self.tracking_distance.valueChanged.connect(self.tracking_settings_changed)
-        self.tracking_diameter.valueChanged.connect(self.tracking_settings_changed)
+        self.scenario.currentIndexChanged.connect(self.refresh)
         self.sensitivity_panel.players.currentTextChanged.connect(
             lambda name: self.notify(f"正在预览 {name} 的灵敏度。"))
         self.crosshair_panel.players.currentTextChanged.connect(
@@ -310,23 +313,22 @@ class MainWindow(QWidget):
     def snapshot(self) -> dict:
         return {
             "dpi": self.dpi.value(), "sensitivity": self.initial_sensitivity.value(),
-            "zoom": self.zoom.value(), "aspect": self.aspect.currentIndex(),
+            "aspect": self.aspect.currentIndex(),
             "duration": self.duration.currentIndex(), "pad": self.pad.value(),
-            "profile": self.profile.currentIndex(), "weapon": self.tracking_speed.currentIndex(),
-            "distance": self.tracking_distance.value(), "diameter": self.tracking_diameter.value(),
-            "step": self.blind_step.value(), "crosshair": asdict(self.crosshair_settings),
+            "profile": self.profile.currentIndex(),
+            "step": self.blind_step.value(), "scenario": self.scenario.currentIndex(), "crosshair": asdict(self.crosshair_settings),
         }
 
     def restore_settings(self) -> None:
         saved = self.history.settings
-        for key, widget in (("dpi", self.dpi), ("sensitivity", self.initial_sensitivity), ("zoom", self.zoom),
-                            ("pad", self.pad), ("distance", self.tracking_distance),
-                            ("diameter", self.tracking_diameter), ("step", self.blind_step)):
+        for key, widget in (("dpi", self.dpi), ("sensitivity", self.initial_sensitivity),
+                            ("pad", self.pad),
+                            ("step", self.blind_step)):
             value = saved.get(key)
             if isinstance(value, (int, float)) and widget.minimum() <= value <= widget.maximum():
                 widget.setValue(int(value) if isinstance(widget, QSpinBox) else value)
         for key, widget in (("aspect", self.aspect), ("duration", self.duration), ("profile", self.profile),
-                            ("weapon", self.tracking_speed)):
+                            ("scenario", self.scenario)):
             index = saved.get(key)
             if isinstance(index, int) and 0 <= index < widget.count():
                 widget.setCurrentIndex(index)
@@ -360,10 +362,9 @@ class MainWindow(QWidget):
         dpi = self.dpi.value() if match_current_dpi else preset.dpi
         sensitivity = preset.sensitivity_at(dpi)
         test_changed = (dpi, sensitivity) != (self.dpi.value(), self.initial_sensitivity.value())
-        with QSignalBlocker(self.dpi), QSignalBlocker(self.initial_sensitivity), QSignalBlocker(self.zoom):
+        with QSignalBlocker(self.dpi), QSignalBlocker(self.initial_sensitivity):
             self.dpi.setValue(dpi)
             self.initial_sensitivity.setValue(sensitivity)
-            self.zoom.setValue(preset.zoom)
         if test_changed:
             self.settings_changed()
         else:
@@ -394,49 +395,42 @@ class MainWindow(QWidget):
         dialog.deleteLater()
 
     def settings_changed(self) -> None:
-        if self.flick is not None or self.tracking is not None:
+        if self.flick is not None:
             self.notify("参数已更改，本次成绩已重置。历史记录仍可对比。")
-        self.flick = self.tracking = None
+        self.flick = None
         self.preview.update()
         self.refresh()
 
     def clear_test_results(self) -> None:
-        self.flick = self.tracking = None
+        self.flick = None
         self.last_blind = None
+        self.last_training = None
+        self.last_suite = None
         self.refresh()
         self.notify("已清除本次测试结果。")
 
     def show_flick_results(self) -> None:
         if self.flick is not None and self.flick.attempts:
             dialog = FlickResults(self.flick, self)
-            supplement = dialog.exec() == SUPPLEMENT
+            dialog.exec()
             dialog.deleteLater()
-            if supplement:
-                missing = self.flick.missing_directions()
-                if missing:
-                    self.supplementing = True
-                    plan = flick_plan(missing, self.random, FLICK_TIMEOUT)
-                    self.notify(f"方向补测 · {len(missing)} 个目标")
-                    self.launch("flick", plan=plan, stage="方向补测")
 
     def show_history(self) -> None:
+        self.history.reload()
         dialog = HistoryDialog(self.history, self)
         dialog.cleared.connect(self.history_cleared)
         dialog.exec()
         dialog.deleteLater()
+        self.refresh()
 
     def history_cleared(self) -> None:
         self.last_blind = None
+        self.last_training = None
+        self.last_suite = None
         self.refresh()
 
     def baseline_values(self):
         return physical_baseline(self.dpi.value(), self.pad.value(), self.profile.currentData())
-
-    def tracking_settings_changed(self) -> None:
-        if self.tracking is not None:
-            self.tracking = None
-            self.notify("跟枪参数已更改，请重测跟枪。")
-        self.refresh()
 
     def refresh(self) -> None:
         crosshair = self.crosshair_settings
@@ -447,55 +441,55 @@ class MainWindow(QWidget):
         physical, swing, turn = self.baseline_values()
         physical = round(physical, 3)
         base = self.initial_sensitivity.value()
-        angular_speed = center_angular_speed(self.tracking_speed.currentData(), self.tracking_distance.value())
-        self.tracking_hint.setText(f"目标全速横穿正前方时约 {angular_speed:.1f}°/秒")
+        selected = self.scenario.currentData()
+        self.scenario_hint.setText(selected.instruction)
         self.baseline.setText(f"舒适行程 {swing:.1f} cm  ·  转身 {turn:.0f}°\n"
                               f"物理建议 {physical:.3f} sens  ·  {cm_per_360(dpi, physical):.2f} cm/360°")
-        flick, track = self.flick, self.tracking
+        flick = self.flick
         self.analysis_button.setEnabled(flick is not None and flick.attempts > 0)
-        self.clear_button.setEnabled(flick is not None or track is not None or self.last_blind is not None)
+        self.clear_button.setEnabled(flick is not None or self.last_blind is not None or self.last_suite is not None)
         self.reveal_button.setEnabled(self.last_blind is not None)
+        self.suite_results_button.setEnabled(self.last_suite is not None)
         self.history_button.setText(f"本地历史 / 对比（{len(self.history.records)}）")
         if flick is None:
-            self.flick_line.setText("悬停拉枪 · 划过目标即可命中")
+            self.flick_line.clear()
         else:
             reaction, movement = flick.timings()
-            overshoot = f"{flick.mean_overshoot:.2f}°" if flick.completed_overshoots else "—"
             sectors = sum(bool(sector.attempts) for sector in flick.sectors)
-            self.flick_line.setText(f"拉枪 {flick.hits}/{flick.attempts} · 过冲 {overshoot} · 方向 {sectors}/16\n"
+            self.flick_line.setText(f"上轮点靶 {flick.hits}/{flick.attempts} · {flick.points:g} 分 · 方向 {sectors}/16\n"
                                    f"启动 {milliseconds(reaction)} · 移动后定位 {milliseconds(movement)}")
-        if track is None:
-            self.track_line.setText("动态跟枪 · 跟住横移目标，停住时也保持准星在目标内")
-        else:
-            lag = f"{track.lag_rate:.0%} · 超前 {track.lead_rate:.0%}" if track.motion_time else "—"
-            reaction, movement = track.timings()
-            self.track_line.setText(f"跟枪 命中时长 {track.accuracy:.0%} · 滞后 {lag}\n"
-                                    f"变向反应 {milliseconds(reaction)} · 移动后稳定 {milliseconds(movement)}")
-
         value = base
-        detail = "当前灵敏度 · 运行 A/B/C 盲测获取调整建议"
-        if self.last_blind is not None:
-            current = self.snapshot()
-            match_keys = ("dpi", "sensitivity", "aspect", "crosshair", "weapon", "distance", "diameter")
-            if all(self.last_blind.settings[key] == current[key] for key in match_keys):
-                decision = self.last_blind.decision()
-                value = decision.recommend.sensitivity
-                detail = f"盲测 · {decision.reason}"
+        detail = f"当前步枪 {base:.3f} · 完成普通训练或 A/B/C 盲测获取建议"
+        advice = None
+        if self.last_training is not None:
+            settings, training = self.last_training
+            if self.settings_match(settings) and settings["duration"] == self.duration.currentIndex():
+                advice = training
+        blind_valid = self.last_blind is not None and self.blind_matches_current(self.last_blind)
+        if advice is not None:
+            value = advice.value
+            detail = f"步枪 {base:.3f} → {value:.3f}（{value - base:+.3f}） · {advice.reason}"
+        elif blind_valid:
+            decision = self.last_blind.decision()
+            value = decision.recommend.sensitivity
+            detail = f"步枪 {base:.3f} → {value:.3f}（{value - base:+.3f}） · {decision.reason}"
         self.recommendation = round(value, 3)
-        self.metrics.setText(f"{self.recommendation:.3f} sens   ·   {edpi(dpi, self.recommendation):.0f} eDPI\n"
+        self.apply_recommendation.setEnabled(self.recommendation != base)
+        self.metrics.setText(f"{self.recommendation:.3f} sens · {adjustment_indicator(base, self.recommendation)}   ·   {edpi(dpi, self.recommendation):.0f} eDPI\n"
                              f"{cm_per_360(dpi, self.recommendation):.2f} cm/360°")
         self.summary.setText(detail)
-        self.cfg.setPlainText(cfg_text(self.recommendation, self.zoom.value()).rstrip())
+        self.cfg.setPlainText(cfg_text(self.recommendation).rstrip())
         self.settings_timer.start()
 
-    def launch(self, mode: str, *, sensitivity=None, plan=None, stage="", reverse_tracking=False) -> None:
+    def launch(self, scenario, *, sensitivity=None, seed=None, stage="", seconds=None) -> None:
         if self.arena is not None:
             return
-        duration = self.duration.currentData() if sensitivity is None else TRACK_SECONDS
-        self.arena = AimArena(mode, self.initial_sensitivity.value() if sensitivity is None else sensitivity,
+        duration = seconds if seconds is not None else (
+            self.duration.currentData() if sensitivity is None else ROUND_SECONDS)
+        self.arena = AimArena(scenario, self.initial_sensitivity.value() if sensitivity is None else sensitivity,
                               self.aspect.currentData(), duration, self.crosshair(),
-                              self.tracking_speed.currentData(), self.tracking_distance.value(),
-                              self.tracking_diameter.value(), plan=plan, stage=stage, reverse_tracking=reverse_tracking)
+                              seed=self.random.getrandbits(64) if seed is None else seed,
+                              stage=stage)
         self.arena.finished.connect(self.arena_finished)
         self.content.setEnabled(False)
         self.arena.open_on(self.screen())
@@ -508,27 +502,79 @@ class MainWindow(QWidget):
         if self.blind is not None:
             self.finish_blind_phase(stats, error)
             return
+        if self.suite is not None:
+            self.finish_suite_round(stats, error)
+            return
         self.content.setEnabled(True)
-        supplemented, self.supplementing = self.supplementing, False
         if stats is not None:
-            if supplemented:
-                self.flick.merge(stats)
-            elif arena.mode == "flick":
-                self.flick = stats
-            else:
-                self.tracking = stats
-            kind = "supplement" if supplemented else arena.mode
-            error = self.save_history(record(kind, self.snapshot(), self.flick, self.tracking))
+            self.flick = stats
+            settings = self.snapshot()
+            self.last_training = (settings, training_advice(stats, settings["sensitivity"]))
+            error = self.save_history(record("scenario", settings, stats, None,
+                                             name=arena.scenario.title))
             self.refresh()
-        self.notify(error or ("已合并方向补测数据。" if supplemented and stats else
-                             "已保存本轮测试。" if stats else "测试已取消。"))
+        self.notify(error or ("已保存本轮测试。" if stats else "测试已取消。"))
         QTimer.singleShot(0, self.activateWindow)
 
+    def start_suite(self) -> None:
+        if self.arena is not None or self.blind is not None or self.suite is not None:
+            return
+        self.suite = SuiteRun(self.snapshot(), self.duration.currentData())
+        self.launch_suite_round()
+
+    def launch_suite_round(self) -> None:
+        if self.suite is None or self.closing:
+            return
+        index = len(self.suite.rounds)
+        stage = f"六项测试 · {index + 1}/{len(SCENARIOS)}"
+        self.launch(SCENARIOS[index], sensitivity=self.suite.settings["sensitivity"],
+                    stage=stage, seconds=self.suite.seconds)
+
+    def finish_suite_round(self, stats, error: str) -> None:
+        suite = self.suite
+        if stats is None:
+            self.suite = None
+            self.content.setEnabled(True)
+            self.refresh()
+            self.notify(error or suite.save_error or "六项测试已取消，已完成的项目保留成绩。")
+            QTimer.singleShot(0, self.activateWindow)
+            return
+        index = len(suite.rounds)
+        scenario = SCENARIOS[index]
+        settings = {**suite.settings, "scenario": index}
+        advice = training_advice(stats, settings["sensitivity"])
+        suite.rounds.append((stats, advice))
+        save_error = self.save_history(record("scenario", settings, stats, None, name=scenario.title))
+        suite.save_error = save_error or suite.save_error
+        if len(suite.rounds) < len(SCENARIOS):
+            QTimer.singleShot(100, self.launch_suite_round)
+            return
+        self.suite = None
+        base = suite.settings["sensitivity"]
+        advice = suite_advice(base, [result for _, result in suite.rounds])
+        self.last_suite = (base, suite.rounds, advice)
+        context = {key: value for key, value in suite.settings.items() if key != "scenario"}
+        self.last_training = (context, advice)
+        conclusion = f"步枪 {base:.3f} → {advice.value:.3f} · {advice.reason}"
+        save_error = self.save_history(record("suite", suite.settings, None, None, conclusion=conclusion))
+        self.content.setEnabled(True)
+        self.refresh()
+        self.notify(save_error or suite.save_error or "六项测试完成，已生成综合建议。")
+        self.activateWindow()
+        QTimer.singleShot(0, self.show_suite_results)
+
+    def show_suite_results(self) -> None:
+        if self.last_suite is not None and not self.closing:
+            dialog = SuiteResults(*self.last_suite, self)
+            dialog.exec()
+            dialog.deleteLater()
+
     def start_blind(self) -> None:
-        if self.arena is not None or self.blind is not None:
+        if self.arena is not None or self.blind is not None or self.suite is not None:
             return
         try:
-            self.blind = BlindSession.create(self.initial_sensitivity.value(), self.blind_step.value(), self.random)
+            self.blind = BlindSession.create(self.initial_sensitivity.value(), self.blind_step.value(), self.random,
+                                             self.scenario.currentData())
         except ValueError as error:
             self.notify(str(error))
             return
@@ -538,11 +584,10 @@ class MainWindow(QWidget):
     def launch_blind_phase(self) -> None:
         if self.blind is None or self.closing:
             return
-        candidate, mode = self.blind.current
+        candidate = self.blind.current
         stage = f"盲测 · {self.blind.progress} · {candidate.label} 组"
         self.notify(f"{stage}，移动鼠标开始。")
-        self.launch(mode, sensitivity=candidate.sensitivity, plan=self.blind.plan if mode == "flick" else None,
-                    stage=stage, reverse_tracking=bool(self.blind.verification))
+        self.launch(self.blind.scenario, sensitivity=candidate.sensitivity, seed=self.blind.seed, stage=stage)
 
     def finish_blind_phase(self, stats, error: str) -> None:
         if stats is None:
@@ -555,11 +600,13 @@ class MainWindow(QWidget):
             QTimer.singleShot(100, self.launch_blind_phase)
             return
         self.last_blind, self.blind = self.blind, None
+        self.last_training = None
         session = self.last_blind
         decision = session.decision()
         entries = [
-            record("blind", {**session.settings, "sensitivity": candidate.sensitivity}, candidate.flick,
-                   candidate.tracking, name=f"{'复核' if candidate in session.verification else '初筛'} {candidate.label}",
+            record("blind", {**session.settings, "sensitivity": candidate.sensitivity},
+                   candidate.stats, None,
+                   name=f"{session.scenario.title} · {'复核' if candidate in session.verification else '初筛'} {candidate.label}",
                    score=candidate.score,
                    conclusion=decision.reason)
             for candidate in session.candidates
@@ -571,24 +618,70 @@ class MainWindow(QWidget):
         self.activateWindow()
         QTimer.singleShot(0, self.show_blind_results)
 
+    def blind_matches_current(self, session: BlindSession) -> bool:
+        return self.settings_match(session.settings)
+
+    def settings_match(self, settings: dict) -> bool:
+        current = self.snapshot()
+        keys = (*MATCH_KEYS, "sensitivity")
+        return all(settings.get(key) == current[key] for key in keys if key != "scenario" or key in settings)
+
+    def show_recommendation_help(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("推荐灵敏度说明")
+        dialog.resize(620, 405)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(9)
+        layout.addWidget(label("如何读推荐值", "section"))
+        layout.addWidget(label(
+            "「当前值 → 建议值」是训练前的步枪灵敏度和建议试用的值。↑ 表示调高，↓ 表示调低。"
+            "eDPI 是 DPI × 灵敏度，cm/360° 是游戏内转一整圈所需移动的距离。", wrap=True))
+        layout.addWidget(label("普通训练", "section"))
+        layout.addWidget(label(
+            "完成一轮就根据本轮瞄准表现给建议，最多调整 3%。固定靶看首段位移，移动靶看开枪瞬间的偏差。至少有 6 个有效样本，且偏差在多个方向一致时才调整。", wrap=True))
+        layout.addWidget(label("六项综合", "section"))
+        layout.addWidget(label(
+            "至少两项支持同一方向，而且占所有给出调整建议的项目至少三分之二，才会调整。"
+            "取同方向建议的中位值，幅度最多 3%。", wrap=True))
+        layout.addWidget(label("A/B/C 盲测", "section"))
+        layout.addWidget(label(
+            f"比较当前值和两档候选，每档 {ROUND_SECONDS} 秒。领先候选会用新一组目标和当前值复核，"
+            "两轮优势达到门槛后才会推荐。候选范围由盲测浮动设置决定。", wrap=True))
+        layout.addWidget(label(
+            "证据不足时会保留当前值。点击「应用建议」会更新软件里的步枪灵敏度。"
+            "复制灵敏度 CFG 后，可把 sensitivity 指令粘贴到 CS2 控制台。", "muted", True))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def apply_current_recommendation(self) -> None:
+        self.initial_sensitivity.setValue(self.recommendation)
+        self.notify(f"已应用步枪灵敏度 · {self.initial_sensitivity.value():.3f}")
+
     def show_blind_results(self) -> None:
         if self.last_blind is None or self.closing:
             return
         session = self.last_blind
         decision = session.decision()
-        dialog = BlindResults(session, decision, self)
+        dialog = BlindResults(session, decision, self, can_apply=self.blind_matches_current(session))
         if dialog.exec() == APPLY_BLIND_RESULT:
-            sensitivity = decision.recommend.sensitivity * session.settings["dpi"] / self.dpi.value()
-            self.initial_sensitivity.setValue(sensitivity)
-            self.notify(f"已应用盲测建议 · {self.initial_sensitivity.value():.3f}")
+            if self.blind_matches_current(session) and self.last_blind is session:
+                self.initial_sensitivity.setValue(decision.recommend.sensitivity)
+                self.notify(f"已应用盲测建议 · {self.initial_sensitivity.value():.3f}")
+            else:
+                self.notify("当前设置已改变，请重新盲测。")
         dialog.deleteLater()
 
     def copy_console(self) -> None:
-        QApplication.clipboard().setText("; ".join(self.config_text("sensitivity").splitlines()))
+        QApplication.clipboard().setText(console_text(self.recommendation))
         self.notify("已复制 CS2 控制台指令。")
 
     def config_text(self, kind: str) -> str:
-        sensitivity = cfg_text(self.recommendation, self.zoom.value()) if kind != "crosshair" else ""
+        sensitivity = cfg_text(self.recommendation) if kind != "crosshair" else ""
         crosshair = crosshair_cfg_text(self.crosshair_settings) if kind != "sensitivity" else ""
         return sensitivity + crosshair
 

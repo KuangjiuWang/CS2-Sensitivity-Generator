@@ -3,14 +3,11 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from random import Random
 
-from core.flick_analysis import SECTOR_LABELS
-from core.practice_plan import FlickPlan, flick_plan
-from core.telemetry import FlickStats, TrackingStats
+from core.scenarios import Scenario
+from core.telemetry import ClickStats
+from core.recommendation import training_score
 
-BLIND_INTERVAL = 1.75
-TRACK_SECONDS = 15
-TARGET_COUNT = len(SECTOR_LABELS)
-MODES = ("flick", "tracking")
+ROUND_SECONDS = 15
 SCREEN_GAIN = 1.0
 VERIFY_GAIN = 2.0
 MEAN_GAIN = 3.0
@@ -20,35 +17,22 @@ MEAN_GAIN = 3.0
 class Candidate:
     label: str
     sensitivity: float
-    flick: FlickStats = field(default_factory=FlickStats)
-    tracking: TrackingStats = field(default_factory=TrackingStats)
-
-    @property
-    def hit_rate(self) -> float:
-        return self.flick.hits / self.flick.attempts if self.flick.attempts else 0
+    scenario: Scenario
+    stats: ClickStats | None = None
 
     @property
     def score(self) -> float:
-        attempts = max(1, self.flick.attempts)
-        # Give misses zero credit; time before movement does not contribute to movement speed.
-        _, movement = self.flick.timings()
-        movement_hits = sum(sector.movement_hits for sector in self.flick.sectors)
-        speed = 0 if movement is None else movement_hits / attempts * max(0, 1 - movement / BLIND_INTERVAL)
-        # Aiming past the target loses up to one quarter of the flick hit component.
-        overshoot = min(self.flick.mean_overshoot / 3, 1)
-        flick_precision = self.hit_rate * (1 - .25 * overshoot)
-        return (35 * flick_precision + 15 * speed +
-                35 * self.tracking.accuracy + 15 * self.tracking.centering)
+        stats = self.stats
+        return training_score(stats.points, stats.elapsed, stats.accuracy, self.scenario.target_rate)
 
     @property
     def enough_data(self) -> bool:
-        return (self.flick.attempts == TARGET_COUNT and self.flick.hits >= 6
-                and self.tracking.elapsed >= TRACK_SECONDS - .05 and self.tracking.accuracy >= .10)
+        stats = self.stats
+        return stats.elapsed >= ROUND_SECONDS - .05 and stats.hits >= 6
 
     def eligible_against(self, baseline: "Candidate", gain: float) -> bool:
         return (self.enough_data and baseline.enough_data and self.score - baseline.score >= gain
-                and self.flick.hits >= baseline.flick.hits - 1
-                and self.tracking.accuracy >= baseline.tracking.accuracy - .05)
+                and self.stats.accuracy >= baseline.stats.accuracy - .05)
 
 
 @dataclass(frozen=True)
@@ -61,7 +45,8 @@ class Decision:
 class BlindSession:
     baseline: float
     screening: list[Candidate]
-    plan: FlickPlan
+    scenario: Scenario
+    seed: int
     random: Random = field(repr=False)
     verification: list[Candidate] = field(default_factory=list)
     phase: int = 0
@@ -69,7 +54,7 @@ class BlindSession:
     result: Decision | None = None
 
     @classmethod
-    def create(cls, baseline: float, step: float, random: Random):
+    def create(cls, baseline: float, step: float, random: Random, scenario: Scenario):
         start = Decimal(str(baseline))
         fraction = Decimal(str(step)) / 100
         low, middle, high = (float((start * (1 + factor * fraction)).quantize(Decimal(".001"), rounding=ROUND_HALF_UP))
@@ -78,28 +63,27 @@ class BlindSession:
             raise ValueError("候选值重合或超出灵敏度范围。请调整当前灵敏度或对比步长。")
         values = [low, middle, high]
         random.shuffle(values)
-        candidates = [Candidate(label, value) for label, value in zip("ABC", values)]
-        return cls(middle, candidates, flick_plan(range(TARGET_COUNT), random, BLIND_INTERVAL, near_parity=0), random)
+        candidates = [Candidate(label, value, scenario) for label, value in zip("ABC", values)]
+        return cls(middle, candidates, scenario, random.getrandbits(64), random)
 
     @property
     def candidates(self) -> list[Candidate]:
         return self.screening + self.verification
 
     @property
-    def current(self) -> tuple[Candidate, str]:
-        return self.candidates[self.phase // len(MODES)], MODES[self.phase % len(MODES)]
+    def current(self) -> Candidate:
+        return self.candidates[self.phase]
 
     @property
     def progress(self) -> str:
         if not self.verification:
-            return f"初筛 {self.phase + 1}/6"
-        return f"复核 {self.phase - len(self.screening) * len(MODES) + 1}/4"
+            return f"初筛 {self.phase + 1}/3"
+        return f"复核 {self.phase - len(self.screening) + 1}/2"
 
-    def record(self, stats: FlickStats | TrackingStats) -> bool:
-        candidate, mode = self.current
-        setattr(candidate, mode, stats)
+    def record(self, stats: ClickStats) -> bool:
+        self.current.stats = stats
         self.phase += 1
-        if self.phase < len(self.candidates) * len(MODES):
+        if self.phase < len(self.candidates):
             return False
         if self.verification:
             self.finish_verification()
@@ -119,8 +103,8 @@ class BlindSession:
         best = max(eligible, key=lambda candidate: candidate.score)
         # Flip the pair's relative order to reduce consistent warm-up and fatigue effects.
         ordered = [candidate for candidate in reversed(self.screening) if candidate is baseline or candidate is best]
-        self.verification = [Candidate(label, candidate.sensitivity) for label, candidate in zip("DE", ordered)]
-        self.plan = flick_plan(range(TARGET_COUNT), self.random, BLIND_INTERVAL, near_parity=1)
+        self.verification = [Candidate(label, candidate.sensitivity, self.scenario) for label, candidate in zip("DE", ordered)]
+        self.seed = self.random.getrandbits(64)
 
     def finish_verification(self) -> None:
         baseline = next(candidate for candidate in self.verification if candidate.sensitivity == self.baseline)

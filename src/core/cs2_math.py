@@ -1,6 +1,6 @@
 """Physical sensitivity and rectilinear camera geometry."""
 from dataclasses import dataclass
-from math import atan, cos, degrees, isfinite, radians, sin, sqrt, tan
+from math import atan, cos, degrees, isfinite, radians, sin, tan
 
 M_YAW = 0.022
 M_PITCH = 0.022
@@ -70,12 +70,12 @@ def physical_baseline(dpi: float, pad_cm: float, profile: str) -> tuple[float, f
     return sensitivity, swing_cm, turn
 
 
-def cfg_text(sensitivity: float, zoom: float) -> str:
-    return f'sensitivity "{positive(sensitivity):.3f}"\nzoom_sensitivity_ratio "{positive(zoom):.3f}"\n'
+def cfg_text(sensitivity: float) -> str:
+    return f'sensitivity "{positive(sensitivity):.3f}"\n'
 
 
-def console_text(sensitivity: float, zoom: float) -> str:
-    return "; ".join(cfg_text(sensitivity, zoom).splitlines())
+def console_text(sensitivity: float) -> str:
+    return cfg_text(sensitivity).rstrip()
 
 
 def dot(first: Ray, second: Ray) -> float:
@@ -106,19 +106,3 @@ class Camera:
         if depth <= 1e-6:
             return None
         return dot(target, right) / depth, dot(target, down) / depth
-
-
-def segment_hit(before: Point, after: Point, radius: float) -> float | None:
-    """Fraction of a projected segment at first contact with the aim region."""
-    x, y = before
-    dx, dy = after[0] - x, after[1] - y
-    offset = x * x + y * y - radius * radius
-    if offset <= 0:
-        return 0.0
-    length_squared = dx * dx + dy * dy
-    approach = x * dx + y * dy
-    discriminant = approach * approach - length_squared * offset
-    if length_squared == 0 or approach >= 0 or discriminant < 0:
-        return None
-    fraction = (-approach - sqrt(discriminant)) / length_squared
-    return fraction if fraction <= 1 else None

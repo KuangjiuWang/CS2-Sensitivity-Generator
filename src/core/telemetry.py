@@ -50,6 +50,17 @@ class FlickStats:
 
 
 @dataclass
+class ClickStats(FlickStats):
+    elapsed: float = 0
+    points: float = 0
+    first_pass_errors: list[tuple[int, float]] = field(default_factory=list)
+
+    @property
+    def accuracy(self) -> float:
+        return self.hits / self.attempts if self.attempts else 0
+
+
+@dataclass
 class TrackingStats:
     elapsed: float = 0
     on_target: float = 0

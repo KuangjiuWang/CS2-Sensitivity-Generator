@@ -19,10 +19,11 @@ class FlickAnalysisTests(unittest.TestCase):
 
     def test_path_efficiency_and_deviation_stop_at_first_contact(self):
         trial = FlickTrial((20, 0), 1, 10)
-        trial.move((0, 3), 10.01, None)
-        trial.move((20, 3), 10.02, None)
-        trial.move((20, 0), 10.03, 2 / 3)
-        trial.move((24, 8), 10.04, None)
+        trial.move((0, 3), 10.01)
+        trial.move((20, 3), 10.02)
+        trial.move((20, 1), 10.03)
+        trial.shoot(10.03, True)
+        trial.move((24, 8), 10.04)
         self.assertAlmostEqual(trial.efficiency, (20 ** 2 + 1) ** .5 / 25)
         self.assertAlmostEqual(trial.deviation, 3)
         self.assertAlmostEqual(trial.peak, 3)
@@ -34,7 +35,8 @@ class FlickAnalysisTests(unittest.TestCase):
     def test_misses_and_incomplete_overshoot_keep_separate_denominators(self):
         stats = FlickSector()
         trial = FlickTrial((20, 0), 1, 0)
-        trial.move((20, 0), .12, .95)
+        trial.move((20, 0), .12)
+        trial.shoot(.12, True)
         stats.add(trial, None)
         for _ in range(7):
             stats.add(FlickTrial((20, 0), 1, 0), None)
@@ -44,6 +46,6 @@ class FlickAnalysisTests(unittest.TestCase):
 
     def test_yaw_wrap_does_not_add_a_full_turn_to_the_path(self):
         trial = FlickTrial((20, 0), 1, 0)
-        trial.move((179, 0), .01, None)
-        trial.move((-179, 0), .02, None)
+        trial.move((179, 0), .01)
+        trial.move((-179, 0), .02)
         self.assertEqual(trial.path_length, 181)

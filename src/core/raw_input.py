@@ -8,6 +8,7 @@ WM_INPUT = 0x00FF
 RID_INPUT = 0x10000003
 RIDEV_REMOVE = 0x0001
 MOUSE_MOVE_ABSOLUTE = 0x0001
+RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001
 SUBCLASS_ID = 1
 
 
@@ -51,8 +52,9 @@ def enable_high_dpi() -> None:
 
 
 class RawMouseInput:
-    def __init__(self, on_move) -> None:
+    def __init__(self, on_move, *, on_left_down=None) -> None:
         self.on_move = on_move
+        self.on_left_down = on_left_down
         self.api = C.WinDLL("user32", use_last_error=True)
         self.controls = C.WinDLL("comctl32", use_last_error=True)
         subclass_proc = C.WINFUNCTYPE(C.c_ssize_t, W.HWND, W.UINT, W.WPARAM, W.LPARAM,
@@ -133,7 +135,11 @@ class RawMouseInput:
         if (wparam & 0xFF) == 0:
             self.api.DefWindowProcW(hwnd, message, wparam, lparam)
         mouse = self.packet.mouse
-        if (read == C.sizeof(self.packet) and self.packet.header.kind == 0
-                and not mouse.flags & MOUSE_MOVE_ABSOLUTE and (mouse.dx or mouse.dy)):
+        if read != C.sizeof(self.packet) or self.packet.header.kind != 0:
+            return 0
+        pressed = mouse.buttons & RI_MOUSE_LEFT_BUTTON_DOWN
+        if not mouse.flags & MOUSE_MOVE_ABSOLUTE and (mouse.dx or mouse.dy):
             self.on_move(mouse.dx, mouse.dy)
+        if pressed and self.on_left_down is not None:
+            self.on_left_down()
         return 0

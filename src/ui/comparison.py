@@ -1,5 +1,6 @@
 """Blind reveal and two-entry history comparison."""
 from datetime import datetime
+from math import isfinite
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -9,6 +10,8 @@ from PySide6.QtWidgets import (
 
 from core.crosshair import STYLES
 from core.flick_analysis import MIN_DIRECTION_SAMPLES, SECTOR_LABELS
+from core.scenarios import SCENARIOS
+from core.recommendation import adjustment_indicator
 from ui.toast import Toast
 
 APPLY_BLIND_RESULT = 2
@@ -37,7 +40,7 @@ def set_row(table, row, values):
 
 
 class BlindResults(QDialog):
-    def __init__(self, session, decision, parent):
+    def __init__(self, session, decision, parent, *, can_apply=True):
         super().__init__(parent)
         self.setWindowTitle("盲测揭晓")
         self.resize(1000, 450)
@@ -46,38 +49,60 @@ class BlindResults(QDialog):
         title.setObjectName("metric")
         title.setWordWrap(True)
         layout.addWidget(title)
-        table = make_table(("阶段 · 组别", "灵敏度", "拉枪命中", "移动后定位", "拉枪过冲",
-                            "跟枪命中", "跟枪居中分", "综合分"), len(session.candidates))
+        table = make_table(("阶段 · 组别", "灵敏度", "表现", "准确率", "综合分"),
+                           len(session.candidates))
         for index, candidate in enumerate(session.candidates):
             stage = "复核" if candidate in session.verification else "初筛"
             marker = " · 当前值" if candidate.sensitivity == session.baseline else ""
             if candidate is decision.recommend and not marker:
                 marker = " · 建议值"
-            overshoot = f"{candidate.flick.mean_overshoot:.2f}°" if candidate.flick.completed_overshoots else DASH
+            stats = candidate.stats
+            detail = f"{stats.hits}/{stats.attempts} · {stats.points:.1f} 分"
             set_row(table, index, (f"{stage} {candidate.label}{marker}", f"{candidate.sensitivity:.3f}",
-                                  f"{candidate.flick.hits}/{candidate.flick.attempts}",
-                                  milliseconds(candidate.flick.timings()[1]), overshoot,
-                                  f"{candidate.tracking.accuracy:.1%}", f"{candidate.tracking.centering * 100:.1f}",
-                                  f"{candidate.score:.1f}"))
+                                  detail, f"{stats.accuracy:.1%}", f"{candidate.score:.1f}"))
         layout.addWidget(table)
-        detail = QLabel("拉枪和跟枪各占 50 分。拉枪看命中、过冲和移动后定位，跟枪看命中时长和准星居中程度。"
-                        "两轮使用不同场景，分差以同轮当前值为参照。")
+        detail = QLabel(f"{session.scenario.title} · 同轮各档共享随机种子，复核换种子。"
+                        "综合分结合单位时间得分和射击准确率。")
         detail.setWordWrap(True)
         layout.addWidget(detail)
         buttons = QHBoxLayout()
         buttons.addStretch()
-        if decision.recommend.sensitivity != session.baseline:
-            apply_button = QPushButton("应用建议值")
+        if decision.recommend.sensitivity != session.baseline and can_apply:
+            apply_button = QPushButton("应用到当前步枪灵敏度")
             apply_button.setObjectName("primary")
             apply_button.clicked.connect(lambda: self.done(APPLY_BLIND_RESULT))
             buttons.addWidget(apply_button)
+        elif not can_apply:
+            buttons.addWidget(QLabel("当前设置与本轮盲测不同，仅供查看。"))
         close = QPushButton("关闭")
         close.clicked.connect(self.accept)
         buttons.addWidget(close)
         layout.addLayout(buttons)
 
 
-HISTORY_KINDS = {"flick": "悬停拉枪", "tracking": "动态跟枪", "supplement": "方向补测", "blind": "盲测"}
+class SuiteResults(QDialog):
+    def __init__(self, base, rounds, advice, parent):
+        super().__init__(parent)
+        self.setWindowTitle("六项综合测试结果")
+        self.resize(1000, 430)
+        layout = QVBoxLayout(self)
+        summary = QLabel(f"步枪 {base:.3f} → {advice.value:.3f} {adjustment_indicator(base, advice.value)}   ·   {advice.reason}")
+        summary.setObjectName("metric")
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        table = make_table(("训练项目", "命中 / 射击", "准确率", "单项建议", "判断依据"), len(rounds))
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        for index, (stats, result) in enumerate(rounds):
+            set_row(table, index, (SCENARIOS[index].title, f"{stats.hits}/{stats.attempts}",
+                                   f"{stats.accuracy:.1%}", f"{result.value:.3f} {adjustment_indicator(base, result.value)}", result.reason))
+        layout.addWidget(table)
+        close = QPushButton("关闭")
+        close.clicked.connect(self.accept)
+        layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)
+
+
+HISTORY_KINDS = {"scenario": "训练", "suite": "六项综合", "flick": "拉枪", "tracking": "动态跟枪",
+                 "supplement": "方向补测", "blind": "盲测"}
 HISTORY_METRICS = (
     ("命中率", "hits", "attempts", ".0%"),
     ("启动反应", "reaction_sum", "starts", "ms"),
@@ -86,6 +111,38 @@ HISTORY_METRICS = (
     ("轨迹直达率", "efficiency_sum", "hits", ".0%"),
     ("最大横偏均值", "deviation_sum", "hits", ".2f°"),
 )
+
+
+def history_label(entry: dict) -> str:
+    """Validate the fields used by the comparison before exposing the record."""
+    time = datetime.fromisoformat(entry["time"]).astimezone().strftime("%m-%d %H:%M:%S")
+    settings = entry["settings"]
+    crosshair = settings["crosshair"]
+    if not 0 <= crosshair["style"] < len(STYLES) or not isinstance(crosshair["style"], int):
+        raise ValueError("invalid crosshair style")
+    numbers = [settings["dpi"], settings["sensitivity"]]
+    numbers.extend(crosshair[key] for key in ("length", "thickness", "gap", "outline_mode", "reference_height"))
+    _ = crosshair["color"]
+    flick, track = entry["flick"], entry["tracking"]
+    if flick is not None:
+        numbers.extend((flick["hits"], flick["attempts"]))
+        sectors = flick["sectors"]
+        if len(sectors) != len(SECTOR_LABELS):
+            raise ValueError("invalid direction count")
+        keys = {key for _, total, count, _ in HISTORY_METRICS for key in (total, count)}
+        numbers.extend(sector[key] for sector in sectors for key in keys)
+    if track is not None:
+        reaction, settle = track["timings"]
+        numbers.extend(value for value in (reaction, settle) if value is not None)
+        numbers.append(track["accuracy"])
+    if entry["score"] is not None:
+        numbers.append(entry["score"])
+        _ = entry["conclusion"]
+    if not all(isinstance(value, (int, float)) and isfinite(value) for value in numbers):
+        raise ValueError("invalid numeric history value")
+    kind = HISTORY_KINDS.get(entry["kind"], entry["kind"])
+    detail = f" · {entry['name']}" if entry["name"] else ""
+    return f"{time} · {kind}{detail} · {settings['sensitivity']:.3f}"
 
 
 class HistoryDialog(QDialog):
@@ -126,26 +183,32 @@ class HistoryDialog(QDialog):
         self.table = make_table(("方向", "参考 · 命中/次数", "参考 · 指标", "对比 · 命中/次数", "对比 · 指标"), 16)
         self.metric_picker.currentIndexChanged.connect(self.refresh)
         layout.addWidget(self.table, 1)
-        legend = QLabel("＊表示该方向少于 3 个目标。准星和完整测算参数随记录保存。")
-        layout.addWidget(legend)
+        self.legend = QLabel()
+        self.legend.setWordWrap(True)
+        layout.addWidget(self.legend)
         self.toast = Toast(self)
         self.populate()
 
     def populate(self) -> None:
-        entries = list(reversed(self.store.records))
+        entries = []
+        for entry in reversed(self.store.records):
+            try:
+                entries.append((history_label(entry), entry))
+            except (KeyError, IndexError, TypeError, ValueError, OverflowError, OSError):
+                continue
+        skipped = len(self.store.records) - len(entries)
+        warning = f"有 {skipped} 条记录无法读取，已跳过。" if skipped else ""
+        self.legend.setText("＊表示该方向少于 3 个目标。 " + warning)
         for offset, selector in enumerate(self.selectors):
             selector.blockSignals(True)
             selector.clear()
-            for entry in entries:
-                time = datetime.fromisoformat(entry["time"]).astimezone().strftime("%m-%d %H:%M:%S")
-                kind = HISTORY_KINDS.get(entry["kind"], entry["kind"])
-                detail = f" · {entry['name']}" if entry["name"] else ""
-                selector.addItem(f"{time} · {kind}{detail} · {entry['settings']['sensitivity']:.3f}", entry)
+            for label, entry in entries:
+                selector.addItem(label, entry)
             if not entries:
                 selector.addItem("暂无测试历史")
             selector.setCurrentIndex(min(offset, max(0, len(entries) - 1)))
             selector.blockSignals(False)
-        self.clear_button.setEnabled(bool(entries) or bool(self.store.error))
+        self.clear_button.setEnabled(bool(self.store.records) or bool(self.store.error))
         self.refresh()
 
     def refresh(self) -> None:
@@ -159,13 +222,16 @@ class HistoryDialog(QDialog):
             text = (f'{settings["dpi"]} DPI × {settings["sensitivity"]:.3f}  ·  '
                     f'{STYLES[crosshair["style"]]}  {crosshair["length"]}/{crosshair["thickness"]}/{crosshair["gap"]} px')
             if entry["flick"]:
-                text += f'\n拉枪命中 {entry["flick"]["hits"]}/{entry["flick"]["attempts"]}'
+                method = {"scenario": "点靶", "click": "旧版点击拉枪"}.get(entry["flick"].get("method"), "旧版悬停拉枪")
+                text += f'\n{method} {entry["flick"]["hits"]}/{entry["flick"]["attempts"]}'
             if entry["tracking"]:
                 track = entry["tracking"]
                 reaction, settle = track["timings"]
                 text += f'\n跟枪 {track["accuracy"]:.0%}  ·  反应 {milliseconds(reaction)}  ·  稳定 {milliseconds(settle)}'
             if entry["score"] is not None:
                 text += f'\n盲测 {entry["score"]:.1f} 分 · {entry["conclusion"]}'
+            elif entry.get("conclusion"):
+                text += f'\n{entry["conclusion"]}'
             summary.setText(text)
             summary.setToolTip(f'准星 RGBA {crosshair["color"]} · 描边 {crosshair["outline_mode"]} · '
                                f'参考高度 {crosshair["reference_height"]} px')
