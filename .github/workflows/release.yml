@@ -2,6 +2,8 @@ name: Windows Release
 
 on:
   push:
+    branches:
+      - 'release/v1.2.0'
     tags:
       - 'v*.*.*'
 
@@ -13,6 +15,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -42,6 +46,26 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           $asset = "dist/CS2-Sensitivity-Generator.exe"
+          if ($env:GITHUB_REF_TYPE -eq 'branch') {
+            $tag = 'v1.2.0'
+            $target = '6cc41674a36a3630f6cb81a9ee6ee88cef58acc7'
+            $source = 'dist/CS2-Sensitivity-Generator-source.zip'
+            git archive --format=zip --prefix=CS2-Sensitivity-Generator/ --output=$source $target
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $notes = @'
+          ## 更新内容
+
+          - 新增六项全屏训练，可按原顺序一键完成，并查看各项成绩与综合灵敏度建议。
+          - 普通训练完成一轮就能按本轮数据给建议。普通训练与六项综合推荐的变化上限为 3%，可微调或保留当前值，显示调高、调低及百分比。
+          - 优化目标随机生成，第一项每波五颗固定球。第二项与第六项使用可复现的分段运动，第六项保持五颗目标。
+          - 测算和灵敏度导出专注于步枪 `sensitivity`，并增加推荐说明。
+          - 修复旧盲测建议误覆盖、移动靶补靶重叠、历史并发写入及损坏记录读取。
+
+          下载 `CS2-Sensitivity-Generator.exe` 即可在 Windows 运行。源码位于随附的 ZIP。
+          '@
+            gh release create $tag $asset $source --target $target --title $tag --notes $notes --latest --repo "$env:GITHUB_REPOSITORY"
+            exit $LASTEXITCODE
+          }
           gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" 2>$null
           if ($LASTEXITCODE -eq 0) {
             gh release upload "$env:RELEASE_TAG" "$asset" --clobber --repo "$env:GITHUB_REPOSITORY"
