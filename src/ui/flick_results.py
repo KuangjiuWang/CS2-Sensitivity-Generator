@@ -124,6 +124,8 @@ class FlickResults(QDialog):
                 if low_sample and column == 0:
                     item.setForeground(QColor("#FFBD7B"))
                     item.setToolTip(f"样本不足，至少需要 {MIN_DIRECTION_SAMPLES} 个目标")
+                if column == 5 and sector.overshoot_count:
+                    item.setToolTip(f"计算 {sector.overshoot_count} 次有效击中在开枪前越过目标远缘的角度。")
                 self.table.setItem(row, column, item)
 
         charts = QVBoxLayout()

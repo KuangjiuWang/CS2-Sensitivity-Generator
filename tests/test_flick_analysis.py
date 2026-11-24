@@ -9,6 +9,14 @@ from core.flick_analysis import FlickSector, FlickTrial, SECTOR_WIDTH, sector_in
 
 
 class FlickAnalysisTests(unittest.TestCase):
+    def test_pre_shot_overshoot_tracks_the_farthest_aim_beyond_the_target(self):
+        trial = FlickTrial((10, 0), 1, 0)
+        trial.move((13, 0), .1)
+        trial.move((10, 0), .2)
+        trial.shoot(.2, True)
+        trial.move((14, 0), .3)
+        self.assertAlmostEqual(trial.pre_shot_overshoot, 2.)
+
     def test_sixteen_clockwise_sectors_and_wraparound(self):
         def index(angle):
             return sector_index((cos(radians(angle)), sin(radians(angle))))

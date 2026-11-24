@@ -32,7 +32,7 @@ git push origin v1.0.0
 
 ### macOS
 
-构建流程以 macOS 15 为目标，分别生成 Apple 芯片（arm64）和 Intel（x86_64）版本。训练与 DPI 检测需要连接 macOS Game Controller 框架能识别的实体鼠标。Valve 的 CS2 原生版支持 Windows 和 SteamOS/Linux。macOS 上可独立运行本训练器，再把导出的 CFG 用于运行 CS2 的环境。[Apple GCMouseInput](https://developer.apple.com/documentation/gamecontroller/gcmouseinput) · [CS2 系统要求](https://store.steampowered.com/app/730/CounterStrike_2/#sysreq_app_730)
+构建流程以 macOS 15 为目标，分别生成 Apple 芯片（arm64）和 Intel（x86_64）版本。训练优先使用实体鼠标的原始输入。触控板或收不到原始位移的设备可用 macOS 兼容输入开始训练，测试场会显示当前模式。兼容输入受系统指针设置影响，建议在拟用于 CS2 的实体鼠标上复测推荐值。DPI 检测需要能发送原始位移的实体鼠标。Valve 的 CS2 原生版支持 Windows 和 SteamOS/Linux。macOS 上可独立运行本训练器，再把导出的 CFG 用于运行 CS2 的环境。[Apple GCMouseInput](https://developer.apple.com/documentation/gamecontroller/gcmouseinput) · [CS2 系统要求](https://store.steampowered.com/app/730/CounterStrike_2/#sysreq_app_730)
 
 在项目根目录创建环境并从源码启动。Apple 芯片上使用 arm64 Python，Intel 上使用 x86_64 Python。
 
@@ -77,6 +77,8 @@ python src/main.py
 
 测量以相对移动的横向净计数乘以 2.54，再除以实际滑动的厘米数。该结果是当前设置和表面下的实测估值。滑动距离、偏离直线和鼠标转动都会影响误差。测量期间只移动待测鼠标，尽量使用较长的标定距离。[Microsoft RAWMOUSE 说明](https://learn.microsoft.com/windows/win32/api/winuser/ns-winuser-rawmouse)
 
+Mac 版从第一只有效移动的实体鼠标读取整次测量。按空格结束时先计入已接收的位移，所用鼠标断开后该次测量作废。
+
 ### CS2 准星设置
 
 在「测试准星」选择「准星设置／导入分享码」。可选样式 0–9，其中样式 1 为动态圆形，样式 4 为静态十字，样式 9 为静态象限。长度和厚度使用整数像素，均可填 1。准星尺寸按所填游戏画面高度和当前测试视口的物理像素高度同比缩放。输入游戏里设置准星时的分辨率高度，例如 1280×960 对应 960 px。可调整中心点、T 形、透明度和描边模式，编辑器会按样式显示相应选项。[Valve 像素单位说明](https://www.counter-strike.net/newsentry/674006995886408819) · [CS2 设置面板游戏文件](https://github.com/SteamTracking/GameTracking-CS2/blob/694f81f05cfcd1994ea9ef6baa31d4583dc1d63b/game/csgo/pak01_dir/panorama/scripts/settingsmenu_crosshair.js)
@@ -99,7 +101,7 @@ python src/main.py
 
 `cm/360 = 舒适挥动距离 × 360 ÷ 转身角度`，`sensitivity = 360 × 2.54 ÷ (DPI × cm/360 × 0.022)`，`eDPI = DPI × sensitivity`。导出区的 eDPI 和 cm/360° 从三位小数的实际导出值计算。发力比例为可审查的默认假设，实际 DPI 与标称 DPI 的偏差会反映到实际物理距离。
 
-Windows 通过 `WM_INPUT` 读取相对计数，并启用 Per-Monitor DPI Awareness V2。macOS 通过 `GCMouse` 读取原始相对位移，使用 Qt Cocoa 的 Retina 缩放。两端均以原始位移计算相机转角，全屏画布选择主界面所在显示器，并在测试期间隐藏和限制指针，结束或失焦时恢复。测试期间请只移动使用所填 DPI 的鼠标。若进入全屏后 12 秒仍未收到相对移动，程序会退出当轮并显示提示。[Apple 鼠标输入与光标处理](https://github.com/apple/game-porting-toolkit/blob/main/game-porting-skills/skills/setting-up-macos-window/references/mouse-and-cursor.md)
+Windows 通过 `WM_INPUT` 读取相对计数，并启用 Per-Monitor DPI Awareness V2。macOS 优先通过 `GCMouse` 读取原始相对位移，使用 Qt Cocoa 的 Retina 缩放。如果只有 `NSEvent` 收到移动，就用它的相对位移进入兼容模式。Mac 版确认收到移动后才锁定指针，本次全屏测试使用同一种输入来源。全屏画布选择主界面所在显示器，退出或失焦时恢复指针。若进入全屏后 12 秒仍未收到相对移动，程序会退出当轮并显示提示。[Apple 鼠标输入与光标处理](https://github.com/apple/game-porting-toolkit/blob/main/game-porting-skills/skills/setting-up-macos-window/references/mouse-and-cursor.md)
 
 横向转角为 `dx × sensitivity × 0.022`，纵向按 CS2 默认俯仰比例计算。准星固定在视口中心，虚拟相机旋转后，将目标相对于相机的横纵坐标除以深度，再以对应半视场角的正切映射到视口。无开镜垂直 FOV 为 73.74°，水平 FOV 为：
 
@@ -127,6 +129,8 @@ Windows 通过 `WM_INPUT` 读取相对计数，并启用 Per-Monitor DPI Awarene
 | 6 | VCT NA-YAY | 五颗球各自分段变速、短停、变向，并小幅改变高度。命中后补靶，球径 1.16°。 |
 
 训练时只显示场景、目标、准星及计分。16 方向数据在结束后查看。
+
+Mac 版按输入事件的时间处理位移与点击，结果和本地历史会标注原始输入或兼容输入。使用中的原始输入设备断开时，当轮取消。
 
 参考资料：[Sixshot 官方榜单](https://aimlabs.com/leaderboards?taskId=sixshot&weaponId=9mm) · [Wide Wide Wall 创意工坊](https://steamcommunity.com/sharedfiles/filedetails/?id=2530722232) · [Aimlabs Phaseshot 指南](https://aimlabs.com/articles/aimlabs-academy/fine-tune-your-precision-in-valorant-to-hit-more-headshots/) · [Aimlabs VCT 任务列表](https://aimlabs.com/articles/aimlabs/the-10-most-popular-aimlabs-tasks-in-november/)
 

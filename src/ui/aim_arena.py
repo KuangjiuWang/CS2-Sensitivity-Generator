@@ -21,6 +21,7 @@ from ui.toast import Toast
 
 ARENA_BACKGROUND = QColor("#151920")
 ACTIVATION_TIMEOUT = 5.0 if sys.platform == "darwin" else 2.0
+INPUT_FINISH_GRACE = .05 if sys.platform == "darwin" else 0.
 
 
 def ball_sprite() -> QPixmap:
@@ -51,7 +52,11 @@ class AimArena(QWidget):
         self.stage_toast = Toast(self) if stage else None
         self.setWindowTitle("CS2 Sensitivity Generator · 测试场")
         self.setCursor(Qt.CursorShape.BlankCursor)
-        self.raw = RawMouseInput(self.move_camera, on_left_down=self.shoot)
+        if sys.platform == "darwin":
+            self.setMouseTracking(True)
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        options = {"timestamped": True} if sys.platform == "darwin" else {}
+        self.raw = RawMouseInput(self.move_camera, on_left_down=self.shoot, **options)
         self.world = Camera()
         self.sprite = ball_sprite()
         self.room_pixmap = None
@@ -118,10 +123,20 @@ class AimArena(QWidget):
                 self.error = "测试窗口失去焦点，本轮已取消。"
                 self.close()
                 return
+            capture_error = getattr(self.raw, "capture_error", "")
+            if capture_error:
+                self.error = capture_error
+                self.close()
+                return
+            if sys.platform == "darwin":
+                self.raw.drain()
+                if self.done:
+                    return
+                now = perf_counter()
             if self.start_time is not None:
                 self.advance(now)
             elif now >= self.input_deadline:
-                self.error = "12 秒内未收到鼠标原始移动。本轮未计分，请连接鼠标后重试。"
+                self.error = "12 秒内未收到鼠标移动。本轮未计分，请检查鼠标连接或重新打开测试。"
                 self.close()
                 return
         if self.done:
@@ -145,21 +160,22 @@ class AimArena(QWidget):
             self.frame_dirty = True
         until = min(now, self.end_time)
         self.stats.elapsed = until - self.start_time
-        if now >= self.end_time:
+        if now >= self.end_time + INPUT_FINISH_GRACE:
             self.done = True
             if self.continuous:
                 self.round_finished.emit(self.stats)
             else:
                 self.close()
 
-    def move_camera(self, dx: float, dy: float) -> None:
+    def move_camera(self, dx: float, dy: float, stamp: float | None = None) -> None:
         if self.input_deadline is None or self.done or not self.isActiveWindow():
             return
-        now = perf_counter()
+        now = perf_counter() if stamp is None else stamp
+        self.stats.input_mode = getattr(self.raw, "input_mode", "win32_raw")
         if self.start_time is None:
             self.start_time = now + 3.
             self.end_time = self.start_time + self.duration
-        if now < self.start_time:
+        if now < self.start_time or (stamp is not None and now >= self.end_time):
             return
         self.advance(now)
         if self.done:
@@ -178,11 +194,11 @@ class AimArena(QWidget):
             if target is not None:
                 yield slot, target, self.world_ray(*target.position(elapsed)), tan(radians(target.radius))
 
-    def shoot(self) -> None:
+    def shoot(self, stamp: float | None = None) -> None:
         if self.done or self.start_time is None or not self.isActiveWindow():
             return
-        now = perf_counter()
-        if now < self.start_time:
+        now = perf_counter() if stamp is None else stamp
+        if now < self.start_time or (stamp is not None and now >= self.end_time):
             return
         self.advance(now)
         if self.done:
@@ -211,7 +227,10 @@ class AimArena(QWidget):
                 aim = local_angles(self.camera.basis()[0], self.shot_basis)
                 trial.move(aim, now)
                 trial.shoot(now, hit)
-                self.stats.sectors[trial.sector].add(trial, None)
+                overshoot = trial.pre_shot_overshoot if hit and trial.onset is not None else None
+                self.stats.sectors[trial.sector].add(trial, overshoot)
+                if overshoot is not None:
+                    self.stats.record_overshoot(overshoot)
                 error = first_pass_error(angles, target.radius, self.trace) if hit and self.scenario.key in STATIC_TASKS else None
                 if error is None:
                     error = shot_error(angles, aim, target.radius)
@@ -309,6 +328,9 @@ class AimArena(QWidget):
             score = f"{self.stats.hits} 命中   ·   {self.stats.accuracy:.0%} 准确率   ·   {self.stats.points:.1f} 分"
             label = f"{remaining:04.1f} s   ·   {score}"
         painter.drawText(QRectF(x, y + 52, w, 28), Qt.AlignmentFlag.AlignHCenter, label)
+        if getattr(self.raw, "compatibility_mode", False):
+            painter.drawText(QRectF(x, y + 78, w, 28), Qt.AlignmentFlag.AlignHCenter,
+                             "macOS 兼容输入 · 受系统指针设置影响")
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:

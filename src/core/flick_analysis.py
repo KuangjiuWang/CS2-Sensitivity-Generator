@@ -91,6 +91,7 @@ class FlickTrial:
         self.efficiency = 0.0
         self.deviation = 0.0
         self.peak = 0.0
+        self.pre_shot_overshoot = 0.0
 
     def move(self, point: Point, now: float) -> None:
         last_x, last_y = self.last_point
@@ -102,6 +103,8 @@ class FlickTrial:
                 self.onset = now
             self.path_length += hypot(x - last_x, y - last_y)
             direction_x, direction_y = self.direction
+            along = x * direction_x + y * direction_y
+            self.pre_shot_overshoot = max(self.pre_shot_overshoot, along - self.distance - self.radius)
             self.deviation = max(self.deviation, abs(x * direction_y - y * direction_x))
         if self.hit_time is not None:
             along = x * self.direction[0] + y * self.direction[1]

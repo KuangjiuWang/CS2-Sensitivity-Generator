@@ -55,6 +55,7 @@ class ClickStats(FlickStats):
     points: float = 0
     first_pass_errors: list[tuple[int, float]] = field(default_factory=list)
     follow_errors: list[float] = field(default_factory=list)
+    input_mode: str = ""
 
     @property
     def accuracy(self) -> float:

@@ -17,6 +17,11 @@ from ui.toast import Toast
 
 APPLY_BLIND_RESULT = 2
 DASH = "—"
+INPUT_NAMES = {
+    "win32_raw": "Windows 原始输入",
+    "mac_raw": "macOS 原始输入",
+    "mac_compat": "macOS 兼容输入（受系统指针设置影响）",
+}
 
 
 def milliseconds(seconds) -> str:
@@ -50,6 +55,10 @@ class BlindResults(QDialog):
         title.setObjectName("metric")
         title.setWordWrap(True)
         layout.addWidget(title)
+        mode = next((stats.input_mode for group in session.candidates for stats in group.rounds.values()
+                     if stats.input_mode), "")
+        if mode:
+            layout.addWidget(QLabel(INPUT_NAMES[mode]))
         evidence = QLabel("\n".join(decision.evidence))
         evidence.setWordWrap(True)
         evidence.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -102,6 +111,8 @@ class SuiteResults(QDialog):
         summary.setObjectName("metric")
         summary.setWordWrap(True)
         layout.addWidget(summary)
+        if rounds and rounds[0][0].input_mode:
+            layout.addWidget(QLabel(INPUT_NAMES[rounds[0][0].input_mode]))
         evidence = QLabel("\n".join(advice.evidence))
         evidence.setWordWrap(True)
         if advice.evidence:
@@ -240,6 +251,7 @@ class HistoryDialog(QDialog):
             crosshair = settings["crosshair"]
             text = (f'{settings["dpi"]} DPI × {settings["sensitivity"]:.3f}  ·  '
                     f'{STYLES[crosshair["style"]]}  {crosshair["length"]}/{crosshair["thickness"]}/{crosshair["gap"]} px')
+            text += "\n" + INPUT_NAMES.get(entry.get("input_mode"), "输入来源未记录")
             if entry["flick"]:
                 method = {"scenario": "点靶", "click": "旧版点击拉枪"}.get(entry["flick"].get("method"), "旧版悬停拉枪")
                 text += f'\n{method} {entry["flick"]["hits"]}/{entry["flick"]["attempts"]}'

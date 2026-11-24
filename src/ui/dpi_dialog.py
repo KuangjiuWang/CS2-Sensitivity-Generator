@@ -63,8 +63,14 @@ class DpiDialog(QDialog):
 
     def toggle_measurement(self) -> None:
         if self.measurement is not None:
+            if drain := getattr(self.raw, "drain", None):
+                drain()
             measurement = self.measurement
+            capture_error = getattr(self.raw, "capture_error", "")
             if self.release_measurement():
+                if capture_error:
+                    self.status.setText(capture_error)
+                    return
                 try:
                     self.measured_dpi = measurement.estimate()
                 except ValueError as error:

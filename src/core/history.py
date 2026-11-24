@@ -34,10 +34,11 @@ def track_report(stats: TrackingStats | None) -> dict | None:
 
 
 def record(kind: str, settings: dict, flick: FlickStats | None, tracking: TrackingStats | None,
-           *, name: str = "", score: float | None = None, conclusion: str = "") -> dict:
+           *, name: str = "", score: float | None = None, conclusion: str = "", input_mode: str = "") -> dict:
     return {"kind": kind, "time": datetime.now().astimezone().isoformat(timespec="seconds"),
             "settings": settings, "flick": flick_report(flick), "tracking": track_report(tracking),
-            "name": name, "score": score, "conclusion": conclusion}
+            "name": name, "score": score, "conclusion": conclusion,
+            "input_mode": flick.input_mode if isinstance(flick, ClickStats) else input_mode}
 
 
 class HistoryStore:

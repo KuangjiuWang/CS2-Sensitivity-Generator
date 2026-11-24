@@ -25,7 +25,7 @@ from core.scenarios import SCENARIOS, TRAINING_DURATIONS
 from core.sensitivity_conversion import PUBG_FOV_DEFAULT, PUBG_FOV_MAX, PUBG_FOV_MIN, hipfire_values
 from core.telemetry import ClickStats
 from ui.aim_arena import AimArena
-from ui.comparison import APPLY_BLIND_RESULT, BlindResults, HistoryDialog, SuiteResults, milliseconds
+from ui.comparison import APPLY_BLIND_RESULT, INPUT_NAMES, BlindResults, HistoryDialog, SuiteResults, milliseconds
 from ui.crosshair import CrosshairEditor, CrosshairPreview
 from ui.dpi_dialog import DpiDialog
 from ui.flick_results import FlickResults
@@ -537,11 +537,13 @@ class MainWindow(QWidget):
         value = base
         detail = f"当前步枪 {base:.3f} · 完成普通训练或 A/B/C 盲测获取建议"
         evidence = ()
+        input_mode = ""
         advice = None
         if self.last_training is not None:
             settings, training = self.last_training
             if self.settings_match(settings) and settings["duration"] == self.duration.currentIndex():
                 advice = training
+                input_mode = settings.get("input_mode", "")
         blind_valid = self.last_blind is not None and self.blind_matches_current(self.last_blind)
         if advice is not None:
             value = advice.value
@@ -552,11 +554,14 @@ class MainWindow(QWidget):
             value = decision.recommend.sensitivity
             detail = f"步枪 {base:.3f} → {value:.3f}（{value - base:+.3f}） · {decision.reason}"
             evidence = decision.evidence
+            input_mode = self.last_blind.settings.get("input_mode", "")
         self.recommendation = round(value, 3)
         self.apply_recommendation.setEnabled(self.recommendation != base)
         self.metrics.setText(f"{self.recommendation:.3f} sens · {adjustment_indicator(base, self.recommendation)}   ·   {edpi(dpi, self.recommendation):.0f} eDPI\n"
                              f"{cm_per_360(dpi, self.recommendation):.2f} cm/360°")
         self.summary.setText(detail)
+        if input_mode in INPUT_NAMES:
+            evidence = (INPUT_NAMES[input_mode], *evidence)
         self.recommendation_evidence.setText("\n".join(evidence))
         self.recommendation_evidence.setVisible(bool(evidence))
         self.cfg.setPlainText(cfg_text(self.recommendation).rstrip())
@@ -606,7 +611,7 @@ class MainWindow(QWidget):
         self.content.setEnabled(True)
         if stats is not None:
             self.flick = stats
-            settings = self.snapshot()
+            settings = {**self.snapshot(), "input_mode": stats.input_mode}
             self.last_training = (settings, training_advice(stats, settings["sensitivity"]))
             error = self.save_history(record("scenario", settings, stats, None,
                                              name=arena.scenario.title))
@@ -653,9 +658,11 @@ class MainWindow(QWidget):
         advice = suite_advice(base, [result for _, result in suite.rounds])
         self.last_suite = (base, suite.rounds, advice)
         context = {key: value for key, value in suite.settings.items() if key != "scenario"}
+        context["input_mode"] = stats.input_mode
         self.last_training = (context, advice)
         conclusion = f"步枪 {base:.3f} → {advice.value:.3f} · {advice.reason}"
-        save_error = self.save_history(record("suite", suite.settings, None, None, conclusion=conclusion))
+        save_error = self.save_history(record("suite", suite.settings, None, None, conclusion=conclusion,
+                                              input_mode=stats.input_mode))
         self.content.setEnabled(True)
         self.refresh()
         self.notify(save_error or suite.save_error or "六项测试完成，已生成综合建议。")
@@ -701,6 +708,7 @@ class MainWindow(QWidget):
         self.last_blind, self.blind = self.blind, None
         self.last_training = None
         session = self.last_blind
+        session.settings["input_mode"] = stats.input_mode
         decision = session.decision()
         entries = [
             record("blind", {**session.settings, "sensitivity": candidate.sensitivity, "scenario": index},
